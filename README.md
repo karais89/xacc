@@ -23,20 +23,19 @@ npm install -g xacc
 ## Usage
 
 ```bash
-# 1. Log into an account with Codex, then save it
-codex login
-xacc save personal
+# 1. Log into an account, then save it (name is suggested from your email)
+xacc login personal
 
-# 2. Log into another account, save that too
-codex login
-xacc save work
+# 2. Log into another account
+xacc login work
 
-# 3. Switch instantly between them
+# 3. Switch instantly between them (pick from a list if you omit the name)
 xacc switch work
-xacc switch personal
+xacc switch
 
 # 4. See saved accounts and which is active
 xacc list
+xacc list --active
 xacc current
 ```
 
@@ -68,9 +67,10 @@ current login as your first profile instead of bailing out.
 | Command | Description |
 | --- | --- |
 | `xacc tui` | Interactive management UI (pick / add / rename / delete) |
-| `xacc save <name>` | Save the current `auth.json` as a named account |
-| `xacc switch <name>` | Switch to a saved account (auto-backs up current) |
-| `xacc list` | List saved accounts; `*` active, `~` recorded but live auth differs |
+| `xacc login [<name>] [flags]` | Run `codex login` (plus any flags like `--device-auth`), then save the account. Name is suggested from your email, or set it directly |
+| `xacc save <name>` | Legacy alias: save the current `auth.json` without logging in |
+| `xacc switch [<name>]` | Switch to a saved account; with no name, pick interactively |
+| `xacc list [--active]` | List saved accounts; `*` active, `~` recorded but live auth differs |
 | `xacc current` | Show the active account |
 | `xacc remove <name>` | Delete a saved account |
 | `xacc help` | Show help |

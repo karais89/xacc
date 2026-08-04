@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import readline from "node:readline";
 
 import {
@@ -10,6 +9,7 @@ import {
   suggestAccountName,
   switchAccount,
 } from "./core.js";
+import { runCodexLogin } from "./login.js";
 
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
@@ -47,7 +47,7 @@ export function buildTemplate(accounts, selected, hint = "") {
 
 // Prompts a single line of input (cursor shown, raw mode off), then returns
 // the answer and restores raw mode.
-function askLine(message) {
+export function askLine(message) {
   return new Promise((resolve) => {
     process.stdout.write(SHOW_CURSOR);
     process.stdin.setRawMode(false);
@@ -142,16 +142,8 @@ export async function selectAccountInteractive() {
     suspend();
     process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
     console.log(`${DIM}Running 'codex login'... complete the login in your browser.${RESET}`);
-    try {
-      const codex = spawn("codex", ["login"], {
-        stdio: "inherit",
-        shell: process.platform === "win32",
-      });
-      await new Promise((resolve) => {
-        codex.on("close", resolve);
-        codex.on("error", resolve);
-      });
-    } catch {
+    const { ok } = await runCodexLogin();
+    if (!ok) {
       hint = "Could not run 'codex login' (is Codex installed?).";
       resume();
       return;

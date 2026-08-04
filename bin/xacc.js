@@ -6,11 +6,12 @@ import {
   listAccounts,
   removeAccount,
   saveAccount,
+  suggestAccountName,
   switchAccount,
 } from "../src/core.js";
-import { selectAccountInteractive } from "../src/tui.js";
+import { runCodexLogin } from "../src/login.js";
+import { askLine, selectAccountInteractive } from "../src/tui.js";
 
-const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
@@ -18,47 +19,49 @@ function printUsage() {
   console.log(`xacc - switch saved Codex CLI accounts
 
 Usage:
-  xacc tui               Interactive account picker
-  xacc save <name>       Save the current auth.json as a named account
-  xacc switch <name>     Switch to a saved account (auto-backs up current)
-  xacc list              List saved accounts
-  xacc current           Show the active account
-  xacc remove <name>     Delete a saved account
-  xacc help              Show this help
+  xacc login [name] [--device-auth]  Run 'codex login', then save the account
+  xacc switch [name]                 Switch account (picker without a name)
+  xacc list [--active]               List saved accounts
+  xacc current                       Show the active account
+  xacc save <name>                   Save the current auth.json as a named account
+  xacc remove <name>                 Delete a saved account
+  xacc tui                           Interactive account manager
+  xacc help                          Show this help
 
 Notes:
-  - To add a new account, run 'codex login', then 'xacc save <name>'.
+  - 'login' runs the real 'codex login' flow (plus any extra args you pass,
+    e.g. --device-auth for headless), then saves it. The account name is
+    suggested from your login email; pass a name to set it directly.
+  - 'save' is a legacy alias that stores the current auth.json without logging in.
   - Restart Codex after switching if it is already running.
   - Storage: ${authFile()}`);
-}
-
-function renderList() {
-  const { accounts, active } = listAccounts();
-  if (accounts.length === 0) {
-    console.log("No saved accounts. Run 'codex login', then 'xacc save <name>'.");
-    return;
-  }
-  for (const account of accounts) {
-    const marker = account.active
-      ? account.matched
-        ? "*"
-        : "~"
-      : " ";
-    const state = account.active
-      ? account.matched
-        ? "active"
-        : "recorded (live auth differs)"
-      : "";
-    console.log(`${marker} ${account.name}${state ? ` ${DIM}(${state})${RESET}` : ""}`);
-  }
-  if (active && !active.matched) {
-    console.log(`${DIM}~ recorded current account (live auth differs from saved snapshot)${RESET}`);
-  }
 }
 
 function die(message) {
   console.error(`Error: ${message}`);
   process.exit(1);
+}
+
+// Returns { name, forwarded }: first non-flag arg is the account name (must be
+// unique), every flag arg is forwarded to the real 'codex login' command.
+function parseLoginArgs(args) {
+  const nameArgs = args.filter((a) => !a.startsWith("-"));
+  const forwarded = args.filter((a) => a.startsWith("-"));
+  if (nameArgs.length > 1) die("Usage: xacc login [<name>] [codex login flags...]");
+  return { name: nameArgs[0], forwarded };
+}
+
+async function tryLogin(resolved, forwarded) {
+  console.log("Running 'codex login'... complete the login in your browser.");
+  const { ok } = await runCodexLogin("codex", ["login", ...forwarded]);
+  if (!ok) die("'codex login' failed. Is Codex installed and did the login succeed?");
+  if (resolved) return resolved;
+  const suggested = suggestAccountName() || "default";
+  if (process.stdin.isTTY) {
+    const answer = await askLine(`Save this login as (default '${suggested}'): `);
+    return answer.trim() || suggested;
+  }
+  return suggested;
 }
 
 const [, , command, ...args] = process.argv;
@@ -67,6 +70,13 @@ try {
   switch (command) {
     case "tui": {
       await selectAccountInteractive();
+      break;
+    }
+    case "login": {
+      const { name, forwarded } = parseLoginArgs(args);
+      const finalName = await tryLogin(name, forwarded);
+      const { overwritten } = saveAccount(finalName);
+      console.log(`Logged in and saved as '${finalName}'.${overwritten ? " (overwritten)" : ""}`);
       break;
     }
     case "save": {
@@ -78,17 +88,41 @@ try {
     }
     case "switch": {
       const name = args[0];
-      if (!name) die("Usage: xacc switch <name>");
+      if (!name) {
+        await selectAccountInteractive();
+        break;
+      }
       const { backedUp } = switchAccount(name);
-      console.log(
-        `Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`
-      );
+      console.log(`Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`);
       console.log("Restart Codex if it is already running.");
       break;
     }
-    case "list":
-      renderList();
+    case "list": {
+      const onlyActive = args.includes("--active");
+      const { accounts, active } = listAccounts();
+      if (accounts.length === 0) {
+        console.log("No saved accounts. Run 'xacc login' to add one.");
+        break;
+      }
+      for (const account of accounts) {
+        if (onlyActive && !account.active) continue;
+        const marker = account.active
+          ? account.matched
+            ? "*"
+            : "~"
+          : " ";
+        const state = account.active
+          ? account.matched
+            ? "active"
+            : "recorded (live auth differs)"
+          : "";
+        console.log(`${marker} ${account.name}${state ? ` ${DIM}(${state})${RESET}` : ""}`);
+      }
+      if (onlyActive && active && !active.matched) {
+        console.log(`${DIM}~ recorded current account (live auth differs from saved snapshot)${RESET}`);
+      }
       break;
+    }
     case "current": {
       const active = getActiveAccount();
       if (!active) {
