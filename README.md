@@ -1,4 +1,4 @@
-# codexsw
+# xacc
 
 Minimal Codex CLI account switcher for Windows / macOS / Linux.
 
@@ -9,7 +9,7 @@ ToS / account-suspension risk from the tool itself.
 ## Why
 
 Codex reads a single `~/.codex/auth.json`. Switching accounts normally means
-logging out and logging back in. `codexsw` keeps one snapshot per account and
+logging out and logging back in. `xacc` keeps one snapshot per account and
 swaps the file instantly.
 
 ## Install
@@ -17,7 +17,7 @@ swaps the file instantly.
 ```bash
 npm install -g .      # from this repo directory
 # or after publishing:
-npm install -g codexsw
+npm install -g xacc
 ```
 
 ## Usage
@@ -25,19 +25,19 @@ npm install -g codexsw
 ```bash
 # 1. Log into an account with Codex, then save it
 codex login
-codexsw save personal
+xacc save personal
 
 # 2. Log into another account, save that too
 codex login
-codexsw save work
+xacc save work
 
 # 3. Switch instantly between them
-codexsw switch work
-codexsw switch personal
+xacc switch work
+xacc switch personal
 
 # 4. See saved accounts and which is active
-codexsw list
-codexsw current
+xacc list
+xacc current
 ```
 
 Restart Codex after switching if it is already running (Codex reads `auth.json`
@@ -46,7 +46,7 @@ only at startup).
 ## Interactive picker
 
 ```bash
-codexsw tui
+xacc tui
 ```
 
 Opens a terminal picker: arrow keys to move, `Enter` to switch, `q`/`Esc` to
@@ -56,13 +56,13 @@ quit. Useful when you want to confirm which account is which before switching.
 
 | Command | Description |
 | --- | --- |
-| `codexsw tui` | Interactive account picker |
-| `codexsw save <name>` | Save the current `auth.json` as a named account |
-| `codexsw switch <name>` | Switch to a saved account (auto-backs up current) |
-| `codexsw list` | List saved accounts; `*` active, `~` recorded but live auth differs |
-| `codexsw current` | Show the active account |
-| `codexsw remove <name>` | Delete a saved account |
-| `codexsw help` | Show help |
+| `xacc tui` | Interactive account picker |
+| `xacc save <name>` | Save the current `auth.json` as a named account |
+| `xacc switch <name>` | Switch to a saved account (auto-backs up current) |
+| `xacc list` | List saved accounts; `*` active, `~` recorded but live auth differs |
+| `xacc current` | Show the active account |
+| `xacc remove <name>` | Delete a saved account |
+| `xacc help` | Show help |
 
 ## How it works
 

@@ -16,7 +16,7 @@ const SHOW_CURSOR = "\x1b[?25h";
 // Pure renderer: returns the block of lines drawn for a given selection.
 export function buildTemplate(accounts, selected) {
   const lines = [
-    `${BOLD}codexsw${RESET}  ${DIM}^/v move, Enter switch, q quit${RESET}`,
+    `${BOLD}xacc${RESET}  ${DIM}^/v move, Enter switch, q quit${RESET}`,
     "",
   ];
   accounts.forEach((account, i) => {
@@ -35,11 +35,11 @@ export function buildTemplate(accounts, selected) {
 export function selectAccountInteractive() {
   const { accounts } = listAccounts();
   if (accounts.length === 0) {
-    console.log("No saved accounts. Run 'codex login', then 'codexsw save <name>'.");
+    console.log("No saved accounts. Run 'codex login', then 'xacc save <name>'.");
     return Promise.resolve(null);
   }
   if (!process.stdin.isTTY) {
-    console.log("Recorded accounts (run 'codexsw tui' in an interactive terminal to pick):");
+    console.log("Recorded accounts (run 'xacc tui' in an interactive terminal to pick):");
     for (const account of accounts) {
       console.log(` ${account.active ? "*" : " "} ${account.name}`);
     }

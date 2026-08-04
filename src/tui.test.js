@@ -10,7 +10,7 @@ test("buildTemplate renders header, accounts, cursor, and state", () => {
   ];
   const block = buildTemplate(accounts, 1);
 
-  assert.match(block[0], /codexsw/);
+  assert.match(block[0], /xacc/);
   assert.equal(block.length, 5); // header + blank + 2 accounts + blank
   assert.match(block[3], />/); // cursor on work (second account)
   assert.match(block[3], /work/);

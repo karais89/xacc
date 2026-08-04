@@ -139,7 +139,7 @@ export function switchAccount(name) {
   const target = accountFile(name);
   if (!fs.existsSync(target)) {
     throw new Error(
-      `Unknown account '${name}'. Run 'codexsw save ${name}' after logging into it.`
+      `Unknown account '${name}'. Run 'xacc save ${name}' after logging into it.`
     );
   }
 

@@ -15,19 +15,19 @@ const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 function printUsage() {
-  console.log(`codexsw - switch saved Codex CLI accounts
+  console.log(`xacc - switch saved Codex CLI accounts
 
 Usage:
-  codexsw tui               Interactive account picker
-  codexsw save <name>       Save the current auth.json as a named account
-  codexsw switch <name>     Switch to a saved account (auto-backs up current)
-  codexsw list              List saved accounts
-  codexsw current           Show the active account
-  codexsw remove <name>     Delete a saved account
-  codexsw help              Show this help
+  xacc tui               Interactive account picker
+  xacc save <name>       Save the current auth.json as a named account
+  xacc switch <name>     Switch to a saved account (auto-backs up current)
+  xacc list              List saved accounts
+  xacc current           Show the active account
+  xacc remove <name>     Delete a saved account
+  xacc help              Show this help
 
 Notes:
-  - To add a new account, run 'codex login', then 'codexsw save <name>'.
+  - To add a new account, run 'codex login', then 'xacc save <name>'.
   - Restart Codex after switching if it is already running.
   - Storage: ${authFile()}`);
 }
@@ -35,7 +35,7 @@ Notes:
 function renderList() {
   const { accounts, active } = listAccounts();
   if (accounts.length === 0) {
-    console.log("No saved accounts. Run 'codex login', then 'codexsw save <name>'.");
+    console.log("No saved accounts. Run 'codex login', then 'xacc save <name>'.");
     return;
   }
   for (const account of accounts) {
@@ -71,14 +71,14 @@ try {
     }
     case "save": {
       const name = args[0];
-      if (!name) die("Usage: codexsw save <name>");
+      if (!name) die("Usage: xacc save <name>");
       const { overwritten } = saveAccount(name);
       console.log(`Saved current auth as '${name}'.${overwritten ? " (overwritten)" : ""}`);
       break;
     }
     case "switch": {
       const name = args[0];
-      if (!name) die("Usage: codexsw switch <name>");
+      if (!name) die("Usage: xacc switch <name>");
       const { backedUp } = switchAccount(name);
       console.log(
         `Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`
@@ -102,7 +102,7 @@ try {
     }
     case "remove": {
       const name = args[0];
-      if (!name) die("Usage: codexsw remove <name>");
+      if (!name) die("Usage: xacc remove <name>");
       removeAccount(name);
       console.log(`Removed '${name}'.`);
       break;
@@ -114,7 +114,7 @@ try {
       printUsage();
       break;
     default:
-      die(`Unknown command '${command}'. See 'codexsw help'.`);
+      die(`Unknown command '${command}'. See 'xacc help'.`);
   }
 } catch (error) {
   die(error.message);
