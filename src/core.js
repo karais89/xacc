@@ -322,3 +322,57 @@ export function writeAuth(bytes) {
 }
 
 export { authFile };
+
+// ── OAuth token refresh ────────────────────────────────────────────────────
+// The public client id Codex CLI uses for ChatGPT OAuth. Refresh tokens are
+// short-lived (minutes/hours) and require refreshing before they can drive the
+// chatgpt.com usage endpoint.
+const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+// Refreshes a saved account's access token using its stored refresh_token and
+// persists the refreshed bundle back to the snapshot, keeping the live auth
+// file in sync when this is the active account so it does not turn stale.
+// Resolves with { refreshed, accessToken }.
+export async function refreshSavedAccountTokens(name) {
+  validateName(name);
+  const file = accountFile(name);
+  if (!fs.existsSync(file)) return { refreshed: false };
+  const data = readJson(file);
+  const refresh = data?.tokens?.refresh_token;
+  if (typeof refresh !== "string" || !refresh) return { refreshed: false };
+  const wasActiveMatch = matchLiveAuth() === name;
+
+  let response;
+  try {
+    response = await fetch(OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: CODEX_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: refresh,
+      }),
+    });
+  } catch {
+    return { refreshed: false };
+  }
+  if (!response.ok) return { refreshed: false };
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    return { refreshed: false };
+  }
+  if (typeof json?.access_token !== "string") return { refreshed: false };
+
+  if (typeof json.refresh_token === "string") data.tokens.refresh_token = json.refresh_token;
+  data.tokens.access_token = json.access_token;
+  if (typeof json.id_token === "string") data.tokens.id_token = json.id_token;
+  data.last_refresh = new Date().toISOString();
+
+  const bytes = Buffer.from(JSON.stringify(data, null, 2) + "\n");
+  writeFileAtomic(file, bytes);
+  if (wasActiveMatch) writeFileAtomic(authFile(), bytes);
+  return { refreshed: true, accessToken: json.access_token };
+}

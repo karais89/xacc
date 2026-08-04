@@ -1,4 +1,4 @@
-import { normalizePlan } from "./core.js";
+import { normalizePlan, refreshSavedAccountTokens } from "./core.js";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -26,40 +26,58 @@ export function parseUsage(json) {
 }
 
 // Fetches the live usage snapshot for a single account. `meta` must be an
-// accountMeta() result carrying accountId + accessToken.
-export function fetchUsage(meta, { timeoutMs = 8000 } = {}) {
-  const { accountId, accessToken } = meta || {};
-  if (!accountId || !accessToken) {
+// accountMeta() result carrying accountId + accessToken. When the backend
+// rejects the token with 401 and `refreshName` is given, the token is
+// refreshed via the stored refresh_token and the request is retried once.
+export function fetchUsage(meta, { timeoutMs = 8000, refreshName } = {}) {
+  const { accountId } = meta || {};
+  if (!accountId || !meta?.accessToken) {
     return Promise.reject(new Error("account has no ChatGPT auth tokens"));
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(USAGE_URL, {
-    method: "GET",
-    signal: controller.signal,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "ChatGPT-Account-Id": accountId,
-      Accept: "application/json",
-      "User-Agent": "xacc",
-    },
-  })
-    .then((res) => {
+  const request = (token, signal) =>
+    fetch(USAGE_URL, {
+      method: "GET",
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "ChatGPT-Account-Id": accountId,
+        Accept: "application/json",
+        "User-Agent": "xacc",
+      },
+    });
+  return (async () => {
+    try {
+      let res = await request(meta.accessToken, controller.signal);
+      if (res.status === 401 && refreshName) {
+        const { refreshed, accessToken } = await refreshSavedAccountTokens(refreshName);
+        if (refreshed && accessToken) {
+          res = await request(accessToken, controller.signal);
+        }
+      }
       if (!res.ok) throw new Error(`usage request failed (HTTP ${res.status})`);
-      return res.json();
-    })
-    .then((json) => {
-      const usage = parseUsage(json);
+      const usage = parseUsage(await res.json());
       if (!usage) throw new Error("unexpected usage response");
       return usage;
-    })
-    .finally(() => clearTimeout(timer));
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 }
 
 // Fetches usage for many accounts concurrently. Always resolves: each account
-// maps to either a parsed usage snapshot or `{ error: message }`.
+// maps to either a parsed usage snapshot or `{ error: message }`. Accounts with
+// an expired token are auto-refreshed via their refresh_token.
 export async function fetchAllUsages(accounts, options = {}) {
-  const settled = await Promise.allSettled(accounts.map((a) => fetchUsage(a._auth, options)));
+  const settled = await Promise.allSettled(
+    accounts.map((a) =>
+      fetchUsage(a._auth, {
+        ...options,
+        refreshName: typeof a.name === "string" ? a.name : undefined,
+      })
+    )
+  );
   return Object.fromEntries(
     accounts.map((a, i) => [
       a.name,
