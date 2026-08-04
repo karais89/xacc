@@ -175,4 +175,8 @@ export function removeAccount(name) {
   return { name };
 }
 
+export function isLoggedIn() {
+  return fs.existsSync(authFile());
+}
+
 export { authFile };

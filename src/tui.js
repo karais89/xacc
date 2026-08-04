@@ -1,6 +1,6 @@
 import readline from "node:readline";
 
-import { listAccounts, switchAccount } from "./core.js";
+import { isLoggedIn, listAccounts, saveAccount, switchAccount } from "./core.js";
 
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
@@ -32,11 +32,46 @@ export function buildTemplate(accounts, selected) {
   return lines;
 }
 
+// Helper: when logged in but nothing saved yet, let the TUI save the current
+// login as the first profile instead of bailing out with a message.
+async function saveFirstAccountInteractive() {
+  console.log("You are logged in, but no accounts are saved yet.");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await new Promise((resolve) => {
+      rl.question("Save this login as (default 'default'): ", resolve);
+    });
+    const name = answer.trim() || "default";
+    const { overwritten } = saveAccount(name);
+    console.log(
+      `Saved current auth as '${name}'.${overwritten ? " (overwritten)" : ""}`
+    );
+    return name;
+  } catch (error) {
+    console.error(`Error: ${error.message}`);
+    return null;
+  } finally {
+    rl.close();
+  }
+}
+
 export function selectAccountInteractive() {
   const { accounts } = listAccounts();
   if (accounts.length === 0) {
-    console.log("No saved accounts. Run 'codex login', then 'xacc save <name>'.");
-    return Promise.resolve(null);
+    if (!isLoggedIn()) {
+      console.log("Not logged in yet. Run 'codex login' first, then 'xacc save <name>'.");
+      return Promise.resolve(null);
+    }
+    if (!process.stdin.isTTY) {
+      console.log(
+        "You are logged in but have no saved accounts. Run 'xacc save <name>' to save the current login."
+      );
+      return Promise.resolve(null);
+    }
+    return saveFirstAccountInteractive();
   }
   if (!process.stdin.isTTY) {
     console.log("Recorded accounts (run 'xacc tui' in an interactive terminal to pick):");
