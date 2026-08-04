@@ -8,6 +8,7 @@ import {
   accountEmail,
   accountMeta,
   authFile,
+  duplicateAccountOf,
   getActiveAccount,
   isLoggedIn,
   listAccounts,
@@ -195,6 +196,25 @@ test("accountMeta exposes email, plan, tokens, and last activity", (t) => {
   assert.equal(meta.accessToken, "tok-abc");
   assert.ok(meta.lastActivity > 0);
   assert.equal(accountMeta("missing"), null);
+});
+
+test("duplicateAccountOf detects a re-used ChatGPT account_id", (t) => {
+  setup(t);
+  writeAuth(JSON.stringify({ tokens: { account_id: "acc-shared" } }));
+  saveAccount("t1");
+  // Second login reuses the same account_id (browser session wasn't switched).
+  writeAuth(JSON.stringify({ tokens: { account_id: "acc-shared" } }));
+  saveAccount("t2");
+  assert.equal(duplicateAccountOf("t2"), "t1");
+
+  // A genuinely different account is not flagged, and missing account_id is safe.
+  writeAuth(JSON.stringify({ tokens: { account_id: "acc-distinct" } }));
+  saveAccount("other");
+  assert.equal(duplicateAccountOf("other"), null);
+  writeAuth("TOKEN-A");
+  saveAccount("sans-id");
+  assert.equal(duplicateAccountOf("sans-id"), null);
+  assert.equal(duplicateAccountOf("does-not-exist"), null);
 });
 
 test("normalizePlan maps backend plan strings to canonical keys", () => {

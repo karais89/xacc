@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 
 import {
   authFile,
+  duplicateAccountOf,
   getActiveAccount,
   listAccounts,
   removeAccount,
@@ -97,7 +98,11 @@ try {
       const { name, forwarded } = parseLoginArgs(args);
       const finalName = await tryLogin(name, forwarded);
       const { overwritten } = saveAccount(finalName);
-      console.log(`Logged in and saved as '${finalName}'.${overwritten ? " (overwritten)" : ""}`);
+      const dup = duplicateAccountOf(finalName);
+      console.log(
+        `Logged in and saved as '${finalName}'.${overwritten ? " (overwritten)" : ""}` +
+          (dup ? ` Warning: same ChatGPT account as '${dup}'.` : "")
+      );
       break;
     }
     case "save": {

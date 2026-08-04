@@ -224,6 +224,22 @@ export function accountEmail(name) {
   return emailFromAuth(readJson(file));
 }
 
+// Returns the name of another saved account whose ChatGPT account_id matches
+// `name` (a duplicate login), or null. A login reuses the same account_id when
+// the browser still holds the previous ChatGPT/SSO session, so the resulting
+// 'new' account is actually the same identity as an existing one.
+export function duplicateAccountOf(name) {
+  const file = accountFile(name);
+  if (!fs.existsSync(file)) return null;
+  const id = readJson(file)?.tokens?.account_id;
+  if (!id) return null;
+  return (
+    listSnapshots().find(
+      (n) => n !== name && readJson(accountFile(n))?.tokens?.account_id === id
+    ) || null
+  );
+}
+
 // Canonical plan keys and their display labels, mirroring codex-auth.
 const PLAN_LABELS = {
   free: "Free",

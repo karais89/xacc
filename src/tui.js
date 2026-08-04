@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 
 import {
   accountMeta,
+  duplicateAccountOf,
   isLoggedIn,
   listAccounts,
   planLabel,
@@ -496,7 +497,11 @@ export async function selectAccountInteractive() {
     try {
       const { overwritten } = saveAccount(name);
       full = load();
-      resume(`${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
+      const dup = duplicateAccountOf(name);
+      resume(
+        `${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}` +
+          (dup ? ` ${T.warn}${G.dotStale}${RESET} same ChatGPT account as '${dup}'` : "")
+      );
       refreshUsage();
     } catch (error) {
       resume(`${error.message}`);
