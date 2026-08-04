@@ -15,9 +15,14 @@ swaps the file instantly.
 ## Install
 
 ```bash
+npm install -g @karais89/xacc
+```
+
+The `xacc` command is then available globally. To build from source
+instead:
+
+```bash
 npm install -g .      # from this repo directory
-# or after publishing:
-npm install -g xacc
 ```
 
 ## Usage
