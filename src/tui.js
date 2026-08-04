@@ -255,7 +255,7 @@ export async function selectAccountInteractive() {
       if (process.stdin.isTTY) {
         process.stdout.write(CLEAR_SCREEN);
         console.log(`${DIM}not logged in${RESET} — run ${CYAN}codex login${RESET} first, then ${CYAN}xacc tui${RESET} again.`);
-        process.exit(0);
+        return null;
       }
       console.log("Not logged in yet. Run 'codex login' first, then run 'xacc tui'.");
       return null;
@@ -271,7 +271,7 @@ export async function selectAccountInteractive() {
       } catch (error) {
         console.error(`Error: ${error.message}`);
       }
-      process.exit(0);
+      return null;
     }
     console.log("You are logged in but no accounts are saved. Run 'xacc save <name>'.");
     return null;
@@ -421,8 +421,9 @@ export async function selectAccountInteractive() {
     onKeypress = (str, key) => {
       if (finished) return;
       if (key.ctrl && key.name === "c") {
-        cleanup();
-        process.exit(130);
+        finish(null);
+        process.exitCode = 130;
+        return;
       }
 
       if (mode === "search") {
