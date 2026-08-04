@@ -258,8 +258,8 @@ function buildDetail(acc, usageLoading) {
   if (usage && !usage.error) {
     const primary = pctOrDash(usage.primary);
     const secondary = pctOrDash(usage.secondary);
-    if (primary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.primary.windowSeconds)}${RESET} ${bar(primary)}`);
-    if (secondary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.secondary.windowSeconds)}${RESET} ${bar(secondary)}`);
+    if (primary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.primary.windowSeconds)} used${RESET} ${bar(primary)}`);
+    if (secondary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.secondary.windowSeconds)} used${RESET} ${bar(secondary)}`);
     if (primary == null && secondary == null) parts.push(`${DIM}${G.sep} no usage data${RESET}`);
   } else if (usage && usage.error) {
     parts.push(`${DIM}${G.sep} usage unavailable${RESET}`);
@@ -316,7 +316,9 @@ function clip(s, max) {
 }
 
 // Prompts a single line of input (cursor shown, raw mode off), then returns
-// the answer and restores raw mode.
+// the answer and re-arms the picker's stdin (raw mode + keypress events). The
+// readline interface otherwise leaves stdin in a state where the picker's
+// keypress handler stops firing, which can strand the top-level await.
 export function askLine(message) {
   return new Promise((resolve) => {
     process.stdout.write(SHOW_CURSOR);
@@ -329,6 +331,8 @@ export function askLine(message) {
       rl.close();
       process.stdin.setRawMode(true);
       process.stdout.write(HIDE_CURSOR);
+      readline.emitKeypressEvents(process.stdin);
+      process.stdin.resume();
       resolve(answer);
     });
   });
@@ -404,6 +408,7 @@ export async function selectAccountInteractive() {
 
   // ── Rendering ────────────────────────────────────────────────────────────
   const render = () => {
+    if (finished) return;
     // Move cursor back to the top-left of the previous frame and redraw,
     // erasing any lines that are no longer part of the frame.
     if (prevHeight) process.stdout.write(MOVE_UP.repeat(prevHeight));
@@ -423,14 +428,20 @@ export async function selectAccountInteractive() {
     render();
   };
 
+  let usageAbort = new AbortController();
+
   // Fetches live usage for every account that has tokens. Runs in the
-  // background and re-renders as results come in.
+  // background and re-renders as results come in. Does nothing once the
+  // picker has finished, so it can never redraw over the exit message.
   const refreshUsage = async () => {
+    if (finished) return;
     const targets = full.filter((a) => a._auth && a._auth.accountId && a._auth.accessToken);
     if (!targets.length) return;
+    usageAbort = new AbortController();
     usageLoading = true;
     render();
-    const map = await fetchAllUsages(targets);
+    const map = await fetchAllUsages(targets, { signal: usageAbort.signal });
+    if (finished) return;
     usageLoading = false;
     for (const a of full) {
       if (map[a.name]) a.usage = map[a.name];
@@ -465,6 +476,10 @@ export async function selectAccountInteractive() {
     refreshList();
     renderClean();
     process.stdout.write(HIDE_CURSOR);
+    // Re-establish the keypress pipeline in case askLine's readline interface
+    // disturbed stdin; otherwise the picker stops responding after a prompt.
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.resume();
   };
 
   const addFlow = async () => {
@@ -528,7 +543,11 @@ export async function selectAccountInteractive() {
   const doSwitch = (name) => {
     try {
       switchAccount(name);
-      clearFrame();
+      // Keep the frame on screen; print the confirmation below it and stop
+      // any background redraw (refreshUsage) from painting over it.
+      finished = true;
+      usageAbort.abort();
+      process.stdout.write(SHOW_CURSOR);
       console.log(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
       finish(name);
     } catch (error) {
@@ -539,12 +558,17 @@ export async function selectAccountInteractive() {
 
   return new Promise((resolvePicker) => {
     let onKeypress;
+    const onEnd = () => {
+      if (!finished) finish(null);
+    };
     const cleanup = () => {
       finished = true;
+      usageAbort.abort();
       process.stdout.write(SHOW_CURSOR);
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdin.removeListener("keypress", onKeypress);
+      process.stdin.removeListener("end", onEnd);
     };
     const finish = (name) => {
       cleanup();
@@ -625,6 +649,7 @@ export async function selectAccountInteractive() {
     process.stdin.resume();
     process.stdout.write(HIDE_CURSOR);
     process.stdin.on("keypress", onKeypress);
+    process.stdin.on("end", onEnd);
     renderClean();
     refreshUsage();
   });

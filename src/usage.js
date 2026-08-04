@@ -29,17 +29,20 @@ export function parseUsage(json) {
 // accountMeta() result carrying accountId + accessToken. When the backend
 // rejects the token with 401 and `refreshName` is given, the token is
 // refreshed via the stored refresh_token and the request is retried once.
-export function fetchUsage(meta, { timeoutMs = 8000, refreshName } = {}) {
+// `signal` (optional) lets the caller abort the request early.
+export function fetchUsage(meta, { timeoutMs = 8000, refreshName, signal } = {}) {
   const { accountId } = meta || {};
   if (!accountId || !meta?.accessToken) {
     return Promise.reject(new Error("account has no ChatGPT auth tokens"));
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const request = (token, signal) =>
+  const onExternalAbort = () => controller.abort();
+  signal?.addEventListener("abort", onExternalAbort, { once: true });
+  const request = (token, s) =>
     fetch(USAGE_URL, {
       method: "GET",
-      signal,
+      signal: s,
       headers: {
         Authorization: `Bearer ${token}`,
         "ChatGPT-Account-Id": accountId,
@@ -62,6 +65,7 @@ export function fetchUsage(meta, { timeoutMs = 8000, refreshName } = {}) {
       return usage;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onExternalAbort);
     }
   })();
 }
