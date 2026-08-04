@@ -8,15 +8,17 @@ const ACCOUNTS = [
   { name: "work", active: false, matched: false },
 ];
 
+const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
 test("buildTemplate renders a bordered frame with title and accounts", () => {
   const block = buildTemplate(ACCOUNTS, 0, { version: "0.1.3" });
 
   assert.match(block[0], /xacc/); // title bar
   assert.match(block[0], /0\.1\.3/); // version
-  assert.match(block[block.length - 1], /^[+└]/); // bottom border
-  assert.match(block.join("\n"), /Accounts/);
-  assert.match(block.join("\n"), /personal/);
-  assert.match(block.join("\n"), /work/);
+  assert.match(strip(block[block.length - 1]), /^[+└]/); // bottom border
+  assert.match(strip(block.join("\n")), /Accounts/);
+  assert.match(strip(block.join("\n")), /personal/);
+  assert.match(strip(block.join("\n")), /work/);
 });
 
 test("buildTemplate highlights the selected account and badges the active one", () => {

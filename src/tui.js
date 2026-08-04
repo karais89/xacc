@@ -15,21 +15,38 @@ import { runCodexLogin } from "./login.js";
 const require = createRequire(import.meta.url);
 const version = require("../package.json").version;
 
-// ── ANSI helpers ──────────────────────────────────────────────────────────
+// ── ANSI control sequences ────────────────────────────────────────────────
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
 const UNDERLINE = "\x1b[4m";
-const REVERSE = "\x1b[7m";
-const GREEN = "\x1b[32m";
-const CYAN = "\x1b[36m";
-const YELLOW = "\x1b[33m";
 const ERASE_LINE = "\x1b[K";
 const MOVE_UP = "\x1b[1A";
 const GOTO_COL = "\x1b[G";
 const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
 const CLEAR_SCREEN = "\x1b[2J\x1b[H";
+
+// ── Theme ─────────────────────────────────────────────────────────────────
+// A single-accent palette tuned for dark terminals (256-color). Every code is
+// emptied when NO_COLOR is set, so the UI degrades gracefully.
+function buildTheme() {
+  const c = (code) => (process.env.NO_COLOR === undefined ? code : "");
+  return {
+    accent: c("\x1b[38;5;81m"), // focus cursor, prompts
+    bright: c("\x1b[38;5;255m"), // active account name
+    dim: c("\x1b[38;5;244m"), // inactive rows, secondary text
+    faint: c("\x1b[38;5;238m"), // frame borders, rails, separators
+    ok: c("\x1b[38;5;79m"), // active status, success
+    warn: c("\x1b[38;5;215m"), // stale status
+    selBg: c("\x1b[48;5;236m"), // selected-row background
+  };
+}
+const T = buildTheme();
+
+// Aliases used by the interactive flows below.
+const DIM = T.dim;
+const CYAN = T.accent;
+const GREEN = T.ok;
 
 // ── Glyph set: box drawing works in modern terminals, ASCII on legacy. ────
 function pickGlyphs() {
@@ -40,23 +57,23 @@ function pickGlyphs() {
     return {
       tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│",
       cursor: "▸", dotActive: "●", dotStale: "◐", dotIdle: "•",
-      up: "↑", down: "↓", enter: "↵", back: "←", sep: "·",
+      up: "↑", down: "↓", enter: "↵", back: "←", sep: "·", check: "✓",
     };
   }
   return {
     tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|",
     cursor: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
-    up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-",
+    up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-", check: "ok",
   };
 }
 
 const G = pickGlyphs();
 
-const cur = `${CYAN}${G.cursor}${RESET}`;
-const dotActive = `${GREEN}${G.dotActive}${RESET}`;
-const dotStale = `${YELLOW}${G.dotStale}${RESET}`;
-const dotIdle = G.dotIdle;
-const rail = `${DIM}${G.v}${RESET}`;
+const cur = `${T.accent}${G.cursor}${RESET}`;
+const dotActive = `${T.ok}${G.dotActive}${RESET}`;
+const dotStale = `${T.warn}${G.dotStale}${RESET}`;
+const dotIdle = `${T.faint}${G.dotIdle}${RESET}`;
+const rail = `${T.faint}${G.v}${RESET}`;
 const padRight = (s, w) => (s.length >= w ? s : s + " ".repeat(w - s.length));
 
 function selectedAccount(accounts, index) {
@@ -74,17 +91,17 @@ export function buildTemplate(accounts, index, opts = {}) {
 
   // ── Title bar ────────────────────────────────────────────────────────────
   const title =
-    `${BOLD}xacc${RESET}${DIM} · Codex account manager${RESET}` +
-    (version ? `${DIM}  v${version}${RESET}` : "");
-  const left = `${G.tl}${G.h} `;
-  const right = ` ${G.tr}`;
+    `${BOLD}xacc${RESET}${T.faint} ${G.sep} Codex account manager${RESET}` +
+    (version ? `${T.faint}  v${version}${RESET}` : "");
+  const left = `${T.faint}${G.tl}${G.h} ${RESET}`;
+  const right = `${T.faint} ${G.tr}${RESET}`;
   const filler = Math.max(0, width - displayWidth(left + title + right));
   lines.push(`${left}${title}${spaceN(filler)}${right}`);
   lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
 
   // ── Toast / hint ─────────────────────────────────────────────────────────
   if (hint) {
-    lines.push(`${rail} ${CYAN}${text(hint)}${spaceN(Math.max(0, inner - 1 - displayWidth(hint)))}${rail}`);
+    lines.push(`${rail} ${T.accent}${text(hint)}${spaceN(Math.max(0, inner - 1 - displayWidth(hint)))}${RESET}${rail}`);
     lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
   }
 
@@ -98,7 +115,6 @@ export function buildTemplate(accounts, index, opts = {}) {
   if (accounts.length === 0 && query.trim()) {
     const noMatch = `${DIM}no matches for '${query}'${RESET}`;
     lines.push(`${rail} ${noMatch}${spaceN(inner - 1 - displayWidth(noMatch))}${rail}`);
-    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
     lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
   } else if (accounts.length === 0) {
     lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
@@ -114,14 +130,13 @@ export function buildTemplate(accounts, index, opts = {}) {
   // ── Divider + status/info ────────────────────────────────────────────────
   lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
   if (mode === "search") {
-    const label = `${CYAN}${UNDERLINE}search${RESET}  ${query}${DIM}|${RESET}`;
+    const label = `${T.accent}${UNDERLINE}search${RESET}  ${query}${T.faint}|${RESET}`;
     lines.push(`${rail} ${text(label)}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
   } else {
     const info = selected
       ? `${statusOf(selected)} ${DIM}${G.sep} ${selected.name}${RESET} ${DIM}${G.sep} ${G.enter} to switch${RESET}`
       : `${DIM}No accounts yet${RESET}`;
-    if (info) lines.push(`${rail} ${text(info)}${spaceN(inner - 1 - displayWidth(info))}${rail}`);
-    else lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(`${rail} ${text(info)}${spaceN(inner - 1 - displayWidth(info))}${rail}`);
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
@@ -135,7 +150,7 @@ export function buildTemplate(accounts, index, opts = {}) {
       `  ${DIM}a add${RESET}  ${DIM}r rename${RESET}  ${DIM}d delete${RESET}  ${DIM}q quit${RESET}`;
   }
   lines.push(`${rail} ${text(keys)}${spaceN(inner - 1 - displayWidth(keys))}${rail}`);
-  lines.push(`${G.bl}${G.h.repeat(inner)}${G.br}`);
+  lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
 
   return lines;
 }
@@ -146,22 +161,26 @@ function buildRow(acc, isSelected) {
       ? dotActive
       : dotStale
     : dotIdle;
+  const cursor = isSelected ? cur : " ";
+  const nameField = padRight(` ${acc.name} `, 28);
+  const shown = isSelected
+    ? `${T.selBg}${T.bright}${nameField}${RESET}`
+    : acc.active
+      ? `${T.bright}${nameField}${RESET}`
+      : `${DIM}${nameField}${RESET}`;
   const badge = acc.active
     ? acc.matched
-      ? `${GREEN}active${RESET}`
-      : `${YELLOW}stale${RESET}`
+      ? `${T.ok}active${RESET}`
+      : `${T.warn}stale${RESET}`
     : "";
-  const cursor = isSelected ? cur : " ";
-  const nameField = padRight(` ${acc.name} `, 26);
-  const shown = isSelected ? `${REVERSE}${nameField}${RESET}` : nameField;
-  return `${cursor} ${dot}${shown}${badge ? ` ${badge}` : ""}`;
+  return `${cursor}${dot}${shown}${badge ? ` ${badge}` : ""}`;
 }
 
 function statusOf(acc) {
   if (!acc.active) return `${DIM}inactive${RESET}`;
   return acc.matched
-    ? `${GREEN}${G.dotActive} active${RESET}`
-    : `${YELLOW}${G.dotStale} current${RESET} ${DIM}(live auth differs)${RESET}`;
+    ? `${T.ok}${G.dotActive} active${RESET}`
+    : `${T.warn}${G.dotStale} current${RESET} ${DIM}(live auth differs)${RESET}`;
 }
 
 function spaceN(n) {
@@ -221,7 +240,6 @@ export async function selectAccountInteractive() {
   let prevHeight = 0;
   let finished = false;
 
-  const innerWidth = () => Math.max(24, (process.stdout.columns || 80) - 2);
   const visible = () => {
     if (!query.trim()) return full;
     const q = query.toLowerCase();
@@ -249,7 +267,7 @@ export async function selectAccountInteractive() {
       const name = answer.trim() || suggestAccountName() || "default";
       try {
         saveAccount(name);
-        console.log(`${GREEN}✓${RESET} Saved the current login as '${name}'.`);
+        console.log(`${T.ok}${G.check}${RESET} Saved the current login as '${name}'.`);
       } catch (error) {
         console.error(`Error: ${error.message}`);
       }
@@ -331,7 +349,7 @@ export async function selectAccountInteractive() {
     try {
       const { overwritten } = saveAccount(name);
       full = listAccounts().accounts;
-      resume(`${GREEN}✓${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
+      resume(`${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
     } catch (error) {
       resume(`${error.message}`);
     }
@@ -347,7 +365,7 @@ export async function selectAccountInteractive() {
       try {
         renameAccount(current.name, newName);
         full = listAccounts().accounts;
-        resume(`${GREEN}✓${RESET} Renamed '${current.name}' -> '${newName}'.`);
+        resume(`${T.ok}${G.check}${RESET} Renamed '${current.name}' -> '${newName}'.`);
       } catch (error) {
         resume(`${error.message}`);
       }
@@ -365,7 +383,7 @@ export async function selectAccountInteractive() {
       try {
         removeAccount(current.name);
         full = listAccounts().accounts;
-        resume(`${GREEN}✓${RESET} Deleted '${current.name}'.`);
+        resume(`${T.ok}${G.check}${RESET} Deleted '${current.name}'.`);
       } catch (error) {
         resume(`${error.message}`);
       }
@@ -378,7 +396,7 @@ export async function selectAccountInteractive() {
     try {
       switchAccount(name);
       clearFrame();
-      console.log(`${GREEN}●${RESET} Switched to '${name}' — restart Codex if it is running.`);
+      console.log(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
       finish(name);
     } catch (error) {
       hint = error.message;
