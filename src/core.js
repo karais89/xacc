@@ -224,18 +224,31 @@ export function accountEmail(name) {
   return emailFromAuth(readJson(file));
 }
 
-// Returns the name of another saved account whose ChatGPT account_id matches
-// `name` (a duplicate login), or null. A login reuses the same account_id when
-// the browser still holds the previous ChatGPT/SSO session, so the resulting
-// 'new' account is actually the same identity as an existing one.
+// Canonical identity key for a saved account's snapshot. Prefers the ChatGPT
+// account_id (a stable UUID per ChatGPT account), falling back to the id_token's
+// SSO subject (sub / chatgpt_account_id / account_id) when that is absent.
+// Returns null when no identity can be derived. Two snapshots are "the same
+// account" exactly when their keys match.
+function identityKey(data) {
+  const tokens = data?.tokens;
+  if (tokens?.account_id) return `acct:${tokens.account_id}`;
+  const auth = claimsFromAuth(data)["https://api.openai.com/auth"] || {};
+  const sub = auth.chatgpt_account_id || auth.account_id || claimsFromAuth(data).sub;
+  return sub ? `sub:${sub}` : null;
+}
+
+// Returns the name of another saved account that shares `name`'s identity (a
+// duplicate login), or null. A login reuses the same identity when the browser
+// still holds the previous ChatGPT/SSO session, so the resulting account is
+// actually the same ChatGPT account as an existing one.
 export function duplicateAccountOf(name) {
   const file = accountFile(name);
   if (!fs.existsSync(file)) return null;
-  const id = readJson(file)?.tokens?.account_id;
-  if (!id) return null;
+  const key = identityKey(readJson(file));
+  if (!key) return null;
   return (
     listSnapshots().find(
-      (n) => n !== name && readJson(accountFile(n))?.tokens?.account_id === id
+      (n) => n !== name && identityKey(readJson(accountFile(n))) === key
     ) || null
   );
 }

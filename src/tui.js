@@ -485,8 +485,18 @@ export async function selectAccountInteractive() {
 
   const addFlow = async () => {
     suspend();
+    // When accounts already exist, default to the device-code flow: it is the
+    // reliable way to sign into a genuinely different account, because the
+    // plain browser flow reuses the browser's existing ChatGPT session.
+    let args = ["login"];
+    if (full.length > 0) {
+      const useDevice = await askLine(
+        `Log in with device-code auth to add a different account? (y/N): `
+      );
+      if (useDevice.trim().toLowerCase() === "y") args = ["login", "--device-auth"];
+    }
     console.log(`${DIM}Running 'codex login'... complete the login in your browser.${RESET}`);
-    const { ok } = await runCodexLogin();
+    const { ok } = await runCodexLogin("codex", args);
     if (!ok) {
       resume(`Could not run 'codex login' (is Codex installed?).`);
       return;
