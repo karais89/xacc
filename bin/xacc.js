@@ -72,10 +72,25 @@ async function tryLogin(resolved, forwarded) {
 
 const [, , command, ...args] = process.argv;
 
+// Runs the interactive picker and then exits the process deterministically.
+// The exit runs on a microtask right after the picker resolves, i.e. before
+// the event loop ever parks again on the raw-mode TTY stdin (or a draining
+// socket), so the process can never hang after switching. Because the picker
+// is no longer a top-level await, forcing the exit also cannot trigger the
+// 'unsettled top-level await' warning.
+const runPicker = (promise) =>
+  promise.then(
+    () => process.exit(process.exitCode || 0),
+    (error) => {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+  );
+
 try {
   switch (command) {
     case "tui": {
-      await selectAccountInteractive();
+      runPicker(selectAccountInteractive());
       break;
     }
     case "login": {
@@ -95,7 +110,7 @@ try {
     case "switch": {
       const name = args[0];
       if (!name) {
-        await selectAccountInteractive();
+        runPicker(selectAccountInteractive());
         break;
       }
       const { backedUp } = switchAccount(name);
