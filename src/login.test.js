@@ -89,6 +89,7 @@ test("login that exits 0 but leaves an empty auth is treated as cancelled", asyn
   writeFileSync(
     fixture,
     `const fs = require("node:fs");
+const path = require("node:path");
 fs.writeFileSync(path.join(process.env.CODEX_HOME, "auth.json"), "{}");
 process.exit(0);`
   );

@@ -7,12 +7,14 @@ import {
   isLoggedIn,
   listAccounts,
   planLabel,
+  readAuth,
   removeAccount,
   renameAccount,
   saveAccount,
   sharedWorkspaceOf,
   suggestAccountName,
   switchAccount,
+  writeAuth,
 } from "./core.js";
 import { runCodexLogin } from "./login.js";
 import { fetchAllUsages } from "./usage.js";
@@ -64,14 +66,14 @@ function pickGlyphs() {
     !!(process.env.WT_SESSION || process.env.TERM_PROGRAM || process.env.ConEmuANSI);
   if (modern) {
     return {
-      tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│",
+      tl: "┌", tr: "┐", bl: "└", br: "┘", lt: "├", rt: "┤", h: "─", v: "│",
       cursor: "▸", dotActive: "●", dotStale: "◐", dotIdle: "•",
       up: "↑", down: "↓", enter: "↵", back: "←", sep: "·", check: "✓",
       barFull: "▓", barEmpty: "░", ellipsis: "…",
     };
   }
   return {
-    tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|",
+    tl: "+", tr: "+", bl: "+", br: "+", lt: "+", rt: "+", h: "-", v: "|",
     cursor: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
     up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-", check: "ok",
     barFull: "#", barEmpty: ".", ellipsis: "...",
@@ -96,7 +98,7 @@ function selectedAccount(accounts, index) {
 
 const MAX_FRAME_WIDTH = 88;
 const MIN_FRAME_WIDTH = 24;
-const DETAIL_ROWS = 4; // reserved usage-panel rows (keeps frame height stable)
+const MAX_VISIBLE_ACCOUNTS = 6;
 
 function computeLayout(columns, rows) {
   const width = Math.max(MIN_FRAME_WIDTH, Math.min(columns - 2, MAX_FRAME_WIDTH));
@@ -105,7 +107,10 @@ function computeLayout(columns, rows) {
   // line; <48: email hidden from the list (shown only in the detail panel).
   const emailInline = columns >= 76;
   const showListEmail = columns >= 48;
-  return { width, inner, columns, rows, emailInline, showListEmail };
+  // Narrow layouts need one extra detail row because the selected account's
+  // email moves out of the list and into the usage panel.
+  const detailRows = showListEmail ? 3 : 4;
+  return { width, inner, columns, rows, emailInline, showListEmail, detailRows };
 }
 
 function statusLabel(acc) {
@@ -140,11 +145,12 @@ function renderAccountRow(acc, isSelected, ctx) {
   const plan = planText(acc);
   const badge = statusLabel(acc);
   const badgeText = `${badge.color}${badge.text}${RESET}`;
-  const left = `${cursor}${dotOf(acc)} ${name}${emailInlineStr}${plan ? ` ${plan}` : ""}`;
+  const left = `${cursor}${dotOf(acc)} ${name}${emailInlineStr}${plan ? `${T.faint} ${G.sep} ${RESET}${plan}` : ""}`;
   const pad = Math.max(0, avail - displayWidth(left) - (1 + displayWidth(badgeText)));
   const line1 = `${left}${spaceN(pad)} ${badgeText}`;
   if (!emailInline && showListEmail && acc.email) {
-    const indent = displayWidth(`${cursor}${dotOf(acc)} ${name}`);
+    // Align the email with the account name, regardless of name length.
+    const indent = 3;
     const line2 = `${" ".repeat(indent)}${DIM}${acc.email}${RESET}`;
     return [line1, line2];
   }
@@ -154,14 +160,15 @@ function renderAccountRow(acc, isSelected, ctx) {
 // The usage / detail panel: a labeled divider plus a fixed-height content area
 // so the frame height never jumps between selections.
 function renderDetailPanel(acc, ctx, opts) {
-  const { inner, showListEmail } = ctx;
+  const { inner, showListEmail, detailRows } = ctx;
   const line = ctx.line;
   const blank = ctx.blank;
   const lines = [];
   const divider = (label) => {
-    const body = label ? `─ ${label}` : "─";
-    const fill = Math.max(0, inner - displayWidth(body) - 1);
-    return `${T.faint}${G.v}${G.h}${body}${G.h.repeat(fill)}${G.v}${RESET}`;
+    const visibleLabel = label ? clip(label, Math.max(0, inner - 4)) : "";
+    const body = visibleLabel ? `${G.h} ${visibleLabel} ` : "";
+    const fill = Math.max(0, inner - displayWidth(body));
+    return `${T.faint}${G.lt}${body}${G.h.repeat(fill)}${G.rt}${RESET}`;
   };
 
   const content = [];
@@ -199,7 +206,7 @@ function renderDetailPanel(acc, ctx, opts) {
   }
 
   lines.push(divider(acc ? `Usage · ${acc.name}` : ""));
-  for (let i = 0; i < DETAIL_ROWS; i++) {
+  for (let i = 0; i < detailRows; i++) {
     lines.push(content[i] ? line(content[i]) : blank());
   }
   lines.push(blank());
@@ -215,8 +222,8 @@ function renderFooter(mode, ctx) {
   const D = (s) => `${DIM}${s}${RESET}`;
   if (mode === "search") {
     return [
-      line(`${D(G.enter)} apply${sep}${D(G.back)} clear${sep}${D("Esc")} ${compact ? "back" : "back to list"}`),
-      line(`${D("a-z")} ${compact ? "filter" : "type to filter"}${sep}${D(G.up)}/${D(G.down)} move${sep}${D("Enter")} switch`),
+      line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("Esc")} close`),
+      line(`${D("type")} filter${sep}${D(G.back)} erase`),
     ];
   }
   return [
@@ -244,7 +251,7 @@ export function buildTemplate(accounts, index, opts = {}) {
   } = opts;
 
   const layout = computeLayout(columns, rows);
-  const { width, inner, emailInline, showListEmail } = layout;
+  const { width, inner, emailInline, showListEmail, detailRows } = layout;
   // Clips to inner-2 so the appended ellipsis still fits within the frame.
   const text = (s) => clip(s, inner - 2);
   // A fully-padded content line: rail + content + fill + rail, always `width` wide.
@@ -269,7 +276,6 @@ export function buildTemplate(accounts, index, opts = {}) {
   }
   if (displayWidth(titleText) > budget) titleText = clip(titleText, Math.max(0, budget - 1));
   lines.push(`${left}${titleText}${spaceN(budget - displayWidth(titleText))}${right}`);
-  lines.push(blank());
 
   // ── Toast / search status ────────────────────────────────────────────────
   // Always reserve this single line so the frame height never changes when a
@@ -282,7 +288,6 @@ export function buildTemplate(accounts, index, opts = {}) {
         ? line(`${T.accent}${hint}${RESET}`)
         : blank()
   );
-  lines.push(blank());
 
   const isModal = mode === "add" || mode === "rename" || mode === "delete";
   if (isModal) {
@@ -293,10 +298,16 @@ export function buildTemplate(accounts, index, opts = {}) {
 
   // ── Account list (paginated to the terminal height) ──────────────────────
   const lpa = emailInline || !showListEmail ? 1 : 2; // lines per account
-  // Rows consumed by everything outside the scrollable list: title, spacer,
-  // reserved toast/search line, list spacer, detail panel, footer, borders.
-  const fixed = 1 + 1 + 1 + 1 + (1 + DETAIL_ROWS + 1) + 2 + 1;
-  const pageSize = Math.max(1, Math.floor((rows - fixed) / lpa));
+  // Keep the dashboard compact when only a few accounts exist, while still
+  // reserving a stable number of rows during filtering. Larger collections
+  // scroll inside a six-account viewport instead of stretching the frame to
+  // fill the terminal.
+  const fixed = 1 + 1 + (1 + detailRows + 1) + 2 + 1;
+  const capacity = Math.max(1, Math.floor((rows - fixed) / lpa));
+  const pageSize = Math.max(
+    1,
+    Math.min(totalCount || accounts.length || 1, MAX_VISIBLE_ACCOUNTS, capacity)
+  );
   const selected = selectedAccount(accounts, index);
 
   if (accounts.length === 0) {
@@ -519,6 +530,8 @@ export async function selectAccountInteractive() {
   let addMethod = "browser";
   let confirmName = "";
   let suggested = "default";
+  let addPriorAuth = null;
+  let addHasAuthenticated = false;
 
   const visible = () => {
     if (!query.trim()) return full;
@@ -647,6 +660,7 @@ export async function selectAccountInteractive() {
   };
   const backToPicker = (msg) => {
     hint = msg || "";
+    process.stdin.setRawMode(true);
     renderClean();
     process.stdout.write(HIDE_CURSOR);
     // Re-establish the keypress pipeline after an external process disturbed
@@ -671,6 +685,7 @@ export async function selectAccountInteractive() {
       backToPicker(`Could not run 'codex login' (is Codex installed? did the login succeed?).`);
       return;
     }
+    addHasAuthenticated = true;
     full = load();
     suggested = suggestAccountName() || "default";
     input = suggested === "default" ? "" : suggested;
@@ -685,6 +700,8 @@ export async function selectAccountInteractive() {
       full = load();
       const dup = duplicateAccountOf(name);
       const ws = sharedWorkspaceOf(name);
+      addHasAuthenticated = false;
+      addPriorAuth = null;
       mode = "nav";
       refreshList();
       backToPicker(
@@ -746,6 +763,10 @@ export async function selectAccountInteractive() {
       if (!finished) finish(null);
     };
     const cleanup = () => {
+      if (mode === "add" && addHasAuthenticated) {
+        writeAuth(addPriorAuth);
+        addHasAuthenticated = false;
+      }
       finished = true;
       usageAbort.abort();
       process.stdout.write(SHOW_CURSOR);
@@ -796,11 +817,18 @@ export async function selectAccountInteractive() {
           } else if (key.name === "return" || key.name === "enter") {
             runLogin();
           } else if (key.name === "escape") {
+            if (addHasAuthenticated) writeAuth(addPriorAuth);
+            addHasAuthenticated = false;
+            addPriorAuth = null;
             mode = "nav";
             render();
           }
         } else {
           if (key.name === "escape") {
+            writeAuth(addPriorAuth);
+            addHasAuthenticated = false;
+            full = load();
+            refreshList();
             addStep = 1;
             hint = "";
             render();
@@ -832,7 +860,7 @@ export async function selectAccountInteractive() {
         return;
       }
       if (mode === "delete") {
-        if (key.name === "y" || key.name === "return" || key.name === "enter") {
+        if (key.name === "y") {
           doDelete();
         } else if (key.name === "n" || key.name === "escape") {
           mode = "nav";
@@ -842,10 +870,17 @@ export async function selectAccountInteractive() {
       }
 
       if (mode === "search") {
-        if (key.name === "escape" || (key.name === "return" || key.name === "enter")) {
+        if (key.name === "escape") {
           mode = "nav";
           refreshList();
           render();
+        } else if (key.name === "up") {
+          moveIndex(-1);
+        } else if (key.name === "down") {
+          moveIndex(1);
+        } else if (key.name === "return" || key.name === "enter") {
+          const current = list[index];
+          if (current) doSwitch(current.name);
         } else if (key.name === "backspace") {
           query = query.slice(0, -1);
           refreshList();
@@ -880,6 +915,8 @@ export async function selectAccountInteractive() {
           break;
         case "a":
           if (full.length) {
+            addPriorAuth = readAuth();
+            addHasAuthenticated = false;
             mode = "add";
             addStep = 1;
             addMethod = "browser";

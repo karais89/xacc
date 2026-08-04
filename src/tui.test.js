@@ -31,6 +31,14 @@ test("frame never exceeds the requested terminal height", () => {
   }
 });
 
+test("a small account list stays compact instead of filling a tall terminal", () => {
+  const accounts = [acc("personal"), acc("work")];
+  const wide = buildTemplate(accounts, 0, { columns: 90, rows: 40 });
+  const mid = buildTemplate(accounts, 0, { columns: 60, rows: 40 });
+  assert.ok(wide.length < 20, `wide frame should be compact, got ${wide.length} rows`);
+  assert.ok(mid.length < 20, `mid frame should be compact, got ${mid.length} rows`);
+});
+
 test("account list is paginated: not all accounts render when space is tight", () => {
   const accounts = many(50);
   const block = buildTemplate(accounts, 0, { columns: 90, rows: 16, version: "0.1.16" });
@@ -53,8 +61,14 @@ test("email renders inline at 76+ cols, on a second line at 48-75, and is hidden
   assert.ok(wideLine.includes("me@example.com"), "inline email at wide widths");
 
   const mid = text(buildTemplate(accounts, 0, { columns: 60, rows: 24 }));
+  const midNameLine = mid.find((l) => l.includes("personal"));
   const midEmailLine = mid.find((l) => l.includes("me@example.com"));
   assert.ok(midEmailLine && !midEmailLine.includes("personal"), "email on its own line at mid widths");
+  assert.equal(
+    midEmailLine.indexOf("me@example.com"),
+    midNameLine.indexOf("personal"),
+    "second-line email aligns with the account name"
+  );
 
   const narrow = text(buildTemplate(accounts, 0, { columns: 40, rows: 24 }));
   const narrowNameLine = narrow.find((l) => l.includes("personal"));
@@ -127,6 +141,9 @@ test("search mode shows the query and a filter status line", () => {
   const all = join(buildTemplate(accounts, 0, { columns: 90, rows: 24, mode: "search", query: "wor" }));
   assert.match(all, /search/);
   assert.match(all, /wor/);
+  assert.match(all, /navigate/);
+  assert.match(all, /switch/);
+  assert.doesNotMatch(all, /apply/);
 });
 
 // ── Modal modes ────────────────────────────────────────────────────────────
