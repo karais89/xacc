@@ -198,19 +198,36 @@ test("accountMeta exposes email, plan, tokens, and last activity", (t) => {
   assert.equal(accountMeta("missing"), null);
 });
 
-test("duplicateAccountOf detects a re-used ChatGPT account_id", (t) => {
+test("duplicateAccountOf distinguishes users by id_token identity, not account_id", (t) => {
   setup(t);
-  writeAuth(JSON.stringify({ tokens: { account_id: "acc-shared" } }));
+  // id_token payload helper: ChatGPT auth namespace lives under this key.
+  const payload = (claims) =>
+    `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+  const auth = (chatgpt_user_id, chatgpt_account_id) =>
+    JSON.stringify({
+      tokens: {
+        id_token: payload({
+          sub: `google-oauth2|999`,
+          email: "u@example.com",
+          "https://api.openai.com/auth": { chatgpt_user_id, chatgpt_account_id },
+        }),
+      },
+    });
+
+  // Same user, same team -> duplicate.
+  writeAuth(auth("user-1", "team-X"));
   saveAccount("t1");
-  // Second login reuses the same account_id (browser session wasn't switched).
-  writeAuth(JSON.stringify({ tokens: { account_id: "acc-shared" } }));
+  writeAuth(auth("user-1", "team-X"));
   saveAccount("t2");
   assert.equal(duplicateAccountOf("t2"), "t1");
 
-  // A genuinely different account is not flagged, and missing account_id is safe.
-  writeAuth(JSON.stringify({ tokens: { account_id: "acc-distinct" } }));
+  // Same team account_id but a DIFFERENT user -> NOT a duplicate. This is the
+  // team-members case that the old account_id key wrongly flagged.
+  writeAuth(auth("user-2", "team-X"));
   saveAccount("other");
   assert.equal(duplicateAccountOf("other"), null);
+
+  // No id_token -> cannot determine identity, so never flagged.
   writeAuth("TOKEN-A");
   saveAccount("sans-id");
   assert.equal(duplicateAccountOf("sans-id"), null);

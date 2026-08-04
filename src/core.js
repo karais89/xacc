@@ -224,18 +224,34 @@ export function accountEmail(name) {
   return emailFromAuth(readJson(file));
 }
 
-// Returns the name of another saved account whose ChatGPT account_id matches
-// `name` (a duplicate login), or null. A login reuses the same account_id when
+// Canonical per-user identity key for a saved account's snapshot. Prefers the
+// individual ChatGPT user id from the id_token, then the SSO subject, then the
+// email. It deliberately does NOT use tokens.account_id: that value is the team
+// / workspace account id, shared by every member of a team, so two genuinely
+// different users in the same team account would otherwise look like one.
+function identityKey(data) {
+  const claims = claimsFromAuth(data);
+  const auth = claims["https://api.openai.com/auth"] || {};
+  const userId = auth.chatgpt_user_id || auth.user_id;
+  if (userId) return `user:${userId}`;
+  if (claims.sub) return `sub:${claims.sub}`;
+  const email = emailFromAuth(data);
+  if (email) return `email:${email}`;
+  return null;
+}
+
+// Returns the name of another saved account that is the same identity as
+// `name` (a duplicate login), or null. A login reuses the same identity when
 // the browser still holds the previous ChatGPT/SSO session, so the resulting
-// 'new' account is actually the same identity as an existing one.
+// account is actually the same user as an existing one.
 export function duplicateAccountOf(name) {
   const file = accountFile(name);
   if (!fs.existsSync(file)) return null;
-  const id = readJson(file)?.tokens?.account_id;
-  if (!id) return null;
+  const key = identityKey(readJson(file));
+  if (!key) return null;
   return (
     listSnapshots().find(
-      (n) => n !== name && readJson(accountFile(n))?.tokens?.account_id === id
+      (n) => n !== name && identityKey(readJson(accountFile(n))) === key
     ) || null
   );
 }
