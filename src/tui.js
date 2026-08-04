@@ -95,66 +95,70 @@ export function buildTemplate(accounts, index, opts = {}) {
   const { query = "", mode = "nav", hint = "", version = "", usageLoading = false } = opts;
   const width = Math.max(24, (process.stdout.columns || 80) - 2);
   const inner = width - 2; // minus rail columns
-  const text = (s) => clip(s, inner - 1);
+  // Clips to inner-2 so the appended ellipsis still fits within the frame.
+  const text = (s) => clip(s, inner - 2);
+  // A fully-padded content line: rail + content + fill + rail, always `width` wide.
+  const line = (s) => {
+    const t = text(s);
+    return `${rail} ${t}${spaceN(Math.max(0, inner - 1 - displayWidth(t)))}${rail}`;
+  };
+  const blank = () => `${rail} ${" ".repeat(inner - 1)}${rail}`;
   const lines = [];
 
   // ── Title bar ────────────────────────────────────────────────────────────
-  const title =
-    `${BOLD}xacc${RESET}${T.faint} ${G.sep} Codex account manager${RESET}` +
-    (version ? `${T.faint}  v${version}${RESET}` : "");
   const left = `${T.faint}${G.tl}${G.h} ${RESET}`;
   const right = `${T.faint} ${G.tr}${RESET}`;
-  const filler = Math.max(0, width - displayWidth(left + title + right));
-  lines.push(`${left}${title}${spaceN(filler)}${right}`);
-  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  let titleText = `${BOLD}xacc${RESET}${T.faint} ${G.sep} Codex account manager${RESET}`;
+  const budget = width - displayWidth(left + right);
+  // Drop the version suffix, then clip, so the top border never exceeds the frame.
+  if (version && displayWidth(titleText + `${T.faint}  v${version}${RESET}`) <= budget) {
+    titleText = `${titleText}${T.faint}  v${version}${RESET}`;
+  }
+  if (displayWidth(titleText) > budget) titleText = clip(titleText, Math.max(0, budget - 1));
+  lines.push(`${left}${titleText}${spaceN(budget - displayWidth(titleText))}${right}`);
+  lines.push(blank());
 
   // ── Toast / hint ─────────────────────────────────────────────────────────
   if (hint) {
-    lines.push(`${rail} ${T.accent}${text(hint)}${spaceN(Math.max(0, inner - 1 - displayWidth(hint)))}${RESET}${rail}`);
-    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(line(`${T.accent}${hint}${RESET}`));
+    lines.push(blank());
   }
 
   // ── List header ──────────────────────────────────────────────────────────
-  const hdr = `${DIM}Accounts${RESET}`;
-  lines.push(`${rail} ${hdr}${spaceN(inner - 1 - displayWidth(hdr))}${rail}`);
-  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  lines.push(line(`${DIM}Accounts${RESET}`));
+  lines.push(blank());
 
   const selected = selectedAccount(accounts, index);
 
   if (accounts.length === 0 && query.trim()) {
-    const noMatch = `${DIM}no matches for '${query}'${RESET}`;
-    lines.push(`${rail} ${noMatch}${spaceN(inner - 1 - displayWidth(noMatch))}${rail}`);
-    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(line(`${DIM}no matches for '${query}'${RESET}`));
+    lines.push(blank());
   } else if (accounts.length === 0) {
-    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
-    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(blank());
+    lines.push(blank());
   } else {
     for (let i = 0; i < accounts.length; i++) {
-      lines.push(`${rail} ${rowOf(accounts[i], i === index, inner - 4)} ${rail}`);
+      lines.push(line(rowOf(accounts[i], i === index, inner - 2)));
     }
   }
 
   // ── Divider + status/info ────────────────────────────────────────────────
-  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  lines.push(blank());
   if (mode === "search") {
-    const label = `${T.accent}${UNDERLINE}search${RESET}  ${query}${T.faint}|${RESET}`;
-    lines.push(`${rail} ${text(label)}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
+    lines.push(line(`${T.accent}${UNDERLINE}search${RESET}  ${query}${T.faint}|${RESET}`));
   } else if (selected) {
     const detail = buildDetail(selected, usageLoading);
     if (detail) {
-      for (const line of detail) {
-        lines.push(`${rail} ${text(line)}${spaceN(inner - 1 - displayWidth(line))}${rail}`);
-      }
+      for (const d of detail) lines.push(line(d));
     } else {
-      lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+      lines.push(blank());
     }
   } else {
-    const label = `${DIM}No accounts yet${RESET}`;
-    lines.push(`${rail} ${label}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
+    lines.push(line(`${DIM}No accounts yet${RESET}`));
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
-  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  lines.push(blank());
   const sep = `${T.faint} ${G.sep} ${RESET}`;
   let keys;
   if (mode === "search") {
@@ -169,7 +173,7 @@ export function buildTemplate(accounts, index, opts = {}) {
       `${DIM}d delete${RESET}${sep}` +
       `${DIM}q quit${RESET}`;
   }
-  lines.push(`${rail} ${text(keys)}${spaceN(inner - 1 - displayWidth(keys))}${rail}`);
+  lines.push(line(keys));
   lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
 
   return lines;
