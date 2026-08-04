@@ -48,6 +48,13 @@ test("buildTemplate shows a toast hint when provided", () => {
 
 test("buildTemplate empty list renders a no-accounts region", () => {
   const block = buildTemplate([], 0, { version: "0.1.3" });
-  assert.match(block.join("\n"), /Accounts/);
+  assert.match(strip(block.join("\n")), /Accounts/);
   assert.ok(block.length > 3);
+});
+
+test("buildTemplate shows the account email inline", () => {
+  const withEmail = [{ name: "work", active: true, matched: true, email: "work@example.com" }];
+  const text = strip(buildTemplate(withEmail, 0, { version: "0.1.3" }).join("\n"));
+  assert.match(text, /work@example\.com/);
+  assert.match(text, /active/);
 });

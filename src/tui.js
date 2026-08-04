@@ -2,6 +2,7 @@ import readline from "node:readline";
 import { createRequire } from "node:module";
 
 import {
+  accountEmail,
   isLoggedIn,
   listAccounts,
   removeAccount,
@@ -38,7 +39,6 @@ function buildTheme() {
     faint: c("\x1b[38;5;238m"), // frame borders, rails, separators
     ok: c("\x1b[38;5;79m"), // active status, success
     warn: c("\x1b[38;5;215m"), // stale status
-    selBg: c("\x1b[48;5;236m"), // selected-row background
   };
 }
 const T = buildTheme();
@@ -48,10 +48,15 @@ const DIM = T.dim;
 const CYAN = T.accent;
 const GREEN = T.ok;
 
-// ── Glyph set: box drawing works in modern terminals, ASCII on legacy. ────
+// ── Glyph set: box drawing needs a modern terminal; fall back to ASCII. ────
+// A terminal that reports 256+ colors almost always renders Unicode glyphs,
+// which is a more reliable signal than environment heuristics on Windows.
 function pickGlyphs() {
+  const colorDepth =
+    typeof process.stdout.getColorDepth === "function" ? process.stdout.getColorDepth() : 4;
   const modern =
     process.platform !== "win32" ||
+    colorDepth >= 8 ||
     !!(process.env.WT_SESSION || process.env.TERM_PROGRAM || process.env.ConEmuANSI);
   if (modern) {
     return {
@@ -74,7 +79,6 @@ const dotActive = `${T.ok}${G.dotActive}${RESET}`;
 const dotStale = `${T.warn}${G.dotStale}${RESET}`;
 const dotIdle = `${T.faint}${G.dotIdle}${RESET}`;
 const rail = `${T.faint}${G.v}${RESET}`;
-const padRight = (s, w) => (s.length >= w ? s : s + " ".repeat(w - s.length));
 
 function selectedAccount(accounts, index) {
   return accounts.length ? accounts[index] : null;
@@ -121,9 +125,7 @@ export function buildTemplate(accounts, index, opts = {}) {
     lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
   } else {
     for (let i = 0; i < accounts.length; i++) {
-      const acc = accounts[i];
-      const rowText = buildRow(acc, i === index);
-      lines.push(`${rail} ${text(rowText)}${spaceN(inner - 1 - displayWidth(rowText))}${rail}`);
+      lines.push(`${rail} ${rowOf(accounts[i], i === index, inner - 4)} ${rail}`);
     }
   }
 
@@ -134,20 +136,28 @@ export function buildTemplate(accounts, index, opts = {}) {
     lines.push(`${rail} ${text(label)}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
   } else {
     const info = selected
-      ? `${statusOf(selected)} ${DIM}${G.sep} ${selected.name}${RESET} ${DIM}${G.sep} ${G.enter} to switch${RESET}`
+      ? `${statusOf(selected)} ${DIM}${G.sep} ${selected.name}${RESET}` +
+        (selected.email ? ` ${DIM}${G.sep} ${selected.email}${RESET}` : "") +
+        ` ${DIM}${G.sep} ${G.enter} to switch${RESET}`
       : `${DIM}No accounts yet${RESET}`;
     lines.push(`${rail} ${text(info)}${spaceN(inner - 1 - displayWidth(info))}${rail}`);
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
   lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  const sep = `${T.faint} ${G.sep} ${RESET}`;
   let keys;
   if (mode === "search") {
-    keys = `${DIM}${G.enter} apply${RESET}   ${DIM}${G.back} clear${RESET}`;
+    keys = `${DIM}${G.enter} apply${RESET}${sep}${DIM}${G.back} clear${RESET}`;
   } else {
     keys =
-      `${DIM}${G.up}/${G.down} move${RESET}  ${DIM}${G.enter} switch${RESET}  ${DIM}/ search${RESET}` +
-      `  ${DIM}a add${RESET}  ${DIM}r rename${RESET}  ${DIM}d delete${RESET}  ${DIM}q quit${RESET}`;
+      `${DIM}${G.up}/${G.down} move${RESET}${sep}` +
+      `${DIM}${G.enter} switch${RESET}${sep}` +
+      `${DIM}/ search${RESET}${sep}` +
+      `${DIM}a add${RESET}${sep}` +
+      `${DIM}r rename${RESET}${sep}` +
+      `${DIM}d delete${RESET}${sep}` +
+      `${DIM}q quit${RESET}`;
   }
   lines.push(`${rail} ${text(keys)}${spaceN(inner - 1 - displayWidth(keys))}${rail}`);
   lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
@@ -155,25 +165,27 @@ export function buildTemplate(accounts, index, opts = {}) {
   return lines;
 }
 
-function buildRow(acc, isSelected) {
-  const dot = acc.active
-    ? acc.matched
-      ? dotActive
-      : dotStale
-    : dotIdle;
+function dotOf(acc) {
+  return acc.active ? (acc.matched ? dotActive : dotStale) : dotIdle;
+}
+
+// Renders one account row: cursor + status dot + name (+ email) on the left,
+// status badge right-aligned. Selection is indicated by an accent cursor and
+// accent name — no background block.
+function rowOf(acc, isSelected, avail) {
   const cursor = isSelected ? cur : " ";
-  const nameField = padRight(` ${acc.name} `, 28);
-  const shown = isSelected
-    ? `${T.selBg}${T.bright}${nameField}${RESET}`
-    : acc.active
-      ? `${T.bright}${nameField}${RESET}`
-      : `${DIM}${nameField}${RESET}`;
+  const nameColor = isSelected ? T.accent : acc.active ? T.bright : DIM;
+  const name = `${nameColor}${acc.name}${RESET}`;
+  const email = acc.email ? `${DIM}  ${acc.email}${RESET}` : "";
   const badge = acc.active
     ? acc.matched
       ? `${T.ok}active${RESET}`
       : `${T.warn}stale${RESET}`
     : "";
-  return `${cursor}${dot}${shown}${badge ? ` ${badge}` : ""}`;
+  const left = `${cursor}${dotOf(acc)} ${name}${email}`;
+  const badgeGap = badge ? 1 + displayWidth(badge) : 0;
+  const pad = Math.max(0, avail - displayWidth(left) - badgeGap);
+  return `${left}${spaceN(pad)}${badge ? ` ${badge}` : ""}`;
 }
 
 function statusOf(acc) {
@@ -233,7 +245,10 @@ export function askLine(message) {
 }
 
 export async function selectAccountInteractive() {
-  let full = listAccounts().accounts;
+  // Enrich saved accounts with their login email for display.
+  const load = () =>
+    listAccounts().accounts.map((a) => ({ ...a, email: accountEmail(a.name) }));
+  let full = load();
   let query = "";
   let mode = "nav";
   let hint = "";
@@ -348,7 +363,7 @@ export async function selectAccountInteractive() {
     const name = answer.trim() || suggested;
     try {
       const { overwritten } = saveAccount(name);
-      full = listAccounts().accounts;
+      full = load();
       resume(`${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
     } catch (error) {
       resume(`${error.message}`);
@@ -364,7 +379,7 @@ export async function selectAccountInteractive() {
     if (newName && newName !== current.name) {
       try {
         renameAccount(current.name, newName);
-        full = listAccounts().accounts;
+        full = load();
         resume(`${T.ok}${G.check}${RESET} Renamed '${current.name}' -> '${newName}'.`);
       } catch (error) {
         resume(`${error.message}`);
@@ -382,7 +397,7 @@ export async function selectAccountInteractive() {
     if (answer.trim().toLowerCase() === "y") {
       try {
         removeAccount(current.name);
-        full = listAccounts().accounts;
+        full = load();
         resume(`${T.ok}${G.check}${RESET} Deleted '${current.name}'.`);
       } catch (error) {
         resume(`${error.message}`);

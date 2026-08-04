@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  accountEmail,
   authFile,
   getActiveAccount,
   isLoggedIn,
@@ -150,4 +151,21 @@ test("isLoggedIn reflects auth.json presence", (t) => {
   assert.equal(isLoggedIn(), false);
   writeAuth("TOKEN-A");
   assert.equal(isLoggedIn(), true);
+});
+
+test("accountEmail returns the email embedded in a saved account", (t) => {
+  setup(t);
+  const payload = Buffer.from(
+    JSON.stringify({ email: "work@example.com" })
+  ).toString("base64url");
+  writeAuth(JSON.stringify({ tokens: { id_token: `h.${payload}.s` } }));
+  saveAccount("work");
+
+  assert.equal(accountEmail("work"), "work@example.com");
+  assert.equal(accountEmail("missing"), null);
+
+  // Saving a fresh, non-JWT login has no email.
+  writeAuth("TOKEN-A");
+  saveAccount("personal");
+  assert.equal(accountEmail("personal"), null);
 });

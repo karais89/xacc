@@ -195,24 +195,33 @@ export function renameAccount(oldName, newName) {
   return { name: newName };
 }
 
+// Extracts the email from a login entity's id_token, or null when unavailable.
+function emailFromAuth(data) {
+  const idToken = data?.tokens?.id_token;
+  if (typeof idToken !== "string" || !idToken.includes(".")) return null;
+  try {
+    const payload = Buffer.from(idToken.split(".")[1], "base64url").toString("utf-8");
+    const claims = JSON.parse(payload);
+    return typeof claims.email === "string" ? claims.email : null;
+  } catch {
+    return null;
+  }
+}
+
 // Derives a sensible default account name from the logged-in id_token's email
 // (e.g. "john.doe@example.com" -> "john.doe"), or null when unavailable.
 export function suggestAccountName() {
   const auth = authFile();
   if (!fs.existsSync(auth)) return null;
-  try {
-    const data = JSON.parse(fs.readFileSync(auth, "utf-8"));
-    const idToken = data?.tokens?.id_token;
-    if (typeof idToken !== "string" || !idToken.includes(".")) return null;
-    const payload = Buffer.from(idToken.split(".")[1], "base64url").toString("utf-8");
-    const claims = JSON.parse(payload);
-    const email = typeof claims.email === "string" ? claims.email : null;
-    if (!email) return null;
-    const local = email.split("@")[0];
-    return NAME_PATTERN.test(local) ? local : null;
-  } catch {
-    return null;
-  }
+  const local = emailFromAuth(readJson(auth))?.split("@")[0];
+  return local && NAME_PATTERN.test(local) ? local : null;
+}
+
+// Returns the email tied to a saved account's snapshot, or null.
+export function accountEmail(name) {
+  const file = accountFile(name);
+  if (!fs.existsSync(file)) return null;
+  return emailFromAuth(readJson(file));
 }
 
 export function isLoggedIn() {
