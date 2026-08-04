@@ -294,4 +294,31 @@ export function isLoggedIn() {
   return fs.existsSync(authFile());
 }
 
+// Reads the live auth.json as a Buffer, or null when absent. Used to restore
+// the previous login if a `codex login` is cancelled or fails.
+export function readAuth() {
+  const file = authFile();
+  if (!fs.existsSync(file)) return null;
+  return fs.readFileSync(file);
+}
+
+// Restores a previously captured auth.json (Buffer), or removes it when null.
+// Errors are swallowed so the account list always reflects what is on disk.
+export function writeAuth(bytes) {
+  const file = authFile();
+  if (bytes == null) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  try {
+    writeFileAtomic(file, bytes);
+  } catch {
+    // ignore
+  }
+}
+
 export { authFile };
