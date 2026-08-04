@@ -3,27 +3,49 @@ import assert from "node:assert/strict";
 
 import { buildTemplate } from "./tui.js";
 
-test("buildTemplate renders header, accounts, cursor, and state", () => {
-  const accounts = [
-    { name: "personal", active: true, matched: true },
-    { name: "work", active: false, matched: false },
-  ];
-  const block = buildTemplate(accounts, 1);
+const ACCOUNTS = [
+  { name: "personal", active: true, matched: true },
+  { name: "work", active: false, matched: false },
+];
 
-  assert.match(block[0], /xacc/);
-  assert.equal(block.length, 5); // header + blank + 2 accounts + blank
-  assert.match(block[3], />/); // cursor on work (second account)
-  assert.match(block[3], /work/);
-  assert.doesNotMatch(block[3], /active/); // work is not active
-  assert.match(block[2], /personal/);
-  assert.match(block[2], /\(active\)/);
+test("buildTemplate renders a bordered frame with title and accounts", () => {
+  const block = buildTemplate(ACCOUNTS, 0, { version: "0.1.3" });
+
+  assert.match(block[0], /xacc/); // title bar
+  assert.match(block[0], /0\.1\.3/); // version
+  assert.match(block[block.length - 1], /^[+└]/); // bottom border
+  assert.match(block.join("\n"), /Accounts/);
+  assert.match(block.join("\n"), /personal/);
+  assert.match(block.join("\n"), /work/);
 });
 
-test("buildTemplate first line has no cursor when selected is not first", () => {
-  const accounts = [
-    { name: "personal", active: true, matched: true },
-    { name: "work", active: false, matched: false },
-  ];
-  const block = buildTemplate(accounts, 1);
-  assert.doesNotMatch(block[2], />/); // personal not selected
+test("buildTemplate highlights the selected account and badges the active one", () => {
+  const block = buildTemplate(ACCOUNTS, 1, { version: "0.1.3" });
+  const text = block.join("\n");
+
+  const selectedLine = block.find((l) => /work/.test(l));
+  assert.match(selectedLine, /[▸>]/); // cursor on the selected row
+  assert.doesNotMatch(selectedLine, /active/); // work is not active
+
+  const activeLine = block.find((l) => /personal/.test(l));
+  assert.match(activeLine, /active/); // active badge
+});
+
+test("buildTemplate search mode shows query and search key hints", () => {
+  const block = buildTemplate(ACCOUNTS, 0, { mode: "search", query: "wor", version: "0.1.3" });
+  const text = block.join("\n");
+  assert.match(text, /search/);
+  assert.match(text, /wor/);
+  assert.match(text, /apply/);
+});
+
+test("buildTemplate shows a toast hint when provided", () => {
+  const block = buildTemplate(ACCOUNTS, 0, { hint: "Saved 'work'.", version: "0.1.3" });
+  assert.match(block.join("\n"), /Saved 'work'/);
+});
+
+test("buildTemplate empty list renders a no-accounts region", () => {
+  const block = buildTemplate([], 0, { version: "0.1.3" });
+  assert.match(block.join("\n"), /Accounts/);
+  assert.ok(block.length > 3);
 });

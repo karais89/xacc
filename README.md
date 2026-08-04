@@ -53,19 +53,23 @@ only at startup).
 xacc tui
 ```
 
-A terminal UI to pick and manage accounts:
+A bordered terminal UI to pick and manage accounts, with a persistent status
+line and an incremental filter:
 
 | Key | Action |
 | --- | --- |
-| `^` / `v` | Move selection |
+| `↑` / `↓` | Move selection |
 | `Enter` | Switch to the selected account |
+| `/` | Search / filter accounts by name |
 | `a` | Add an account (runs `codex login`, suggests a name from the logged-in email) |
 | `r` | Rename the selected account |
 | `d` | Delete the selected account (asks for confirmation) |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
-If you are logged in but have no saved accounts, the TUI lets you save the
-current login as your first profile instead of bailing out.
+The active account is marked with a colored badge (`active` / `stale` when the
+live auth has drifted from the saved snapshot). If you are logged in but have
+no saved accounts, the TUI lets you save the current login as your first
+profile instead of bailing out.
 
 ## Commands
 

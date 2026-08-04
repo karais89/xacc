@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { createRequire } from "node:module";
 
 import {
   isLoggedIn,
@@ -11,38 +12,186 @@ import {
 } from "./core.js";
 import { runCodexLogin } from "./login.js";
 
-const DIM = "\x1b[2m";
-const BOLD = "\x1b[1m";
-const CYAN = "\x1b[36m";
+const require = createRequire(import.meta.url);
+const version = require("../package.json").version;
+
+// ── ANSI helpers ──────────────────────────────────────────────────────────
 const RESET = "\x1b[0m";
-// eslint-disable-next-line no-control-regex
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+const UNDERLINE = "\x1b[4m";
+const REVERSE = "\x1b[7m";
+const GREEN = "\x1b[32m";
+const CYAN = "\x1b[36m";
+const YELLOW = "\x1b[33m";
 const ERASE_LINE = "\x1b[K";
-// eslint-disable-next-line no-control-regex
 const MOVE_UP = "\x1b[1A";
+const GOTO_COL = "\x1b[G";
 const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
 const CLEAR_SCREEN = "\x1b[2J\x1b[H";
 
-const CONTROLS =
-  `${DIM}^/v move · Enter switch · a add · r rename · d delete · q quit${RESET}`;
-
-// Pure renderer: returns the block of lines drawn for a given selection.
-export function buildTemplate(accounts, selected, hint = "") {
-  const lines = [`${BOLD}xacc${RESET}  ${CONTROLS}`, ""];
-  if (hint) {
-    lines.push(`${CYAN}${hint}${RESET}`);
+// ── Glyph set: box drawing works in modern terminals, ASCII on legacy. ────
+function pickGlyphs() {
+  const modern =
+    process.platform !== "win32" ||
+    !!(process.env.WT_SESSION || process.env.TERM_PROGRAM || process.env.ConEmuANSI);
+  if (modern) {
+    return {
+      tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│",
+      cursor: "▸", dotActive: "●", dotStale: "◐", dotIdle: "•",
+      up: "↑", down: "↓", enter: "↵", back: "←", sep: "·",
+    };
   }
-  accounts.forEach((account, i) => {
-    const cursor = i === selected ? `${CYAN}>${RESET} ` : "  ";
-    const state = account.active
-      ? account.matched
-        ? `${CYAN}(active)${RESET}`
-        : `${DIM}(recorded)${RESET}`
-      : "";
-    lines.push(`${cursor}${account.name} ${state}`);
-  });
-  lines.push("");
+  return {
+    tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|",
+    cursor: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
+    up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-",
+  };
+}
+
+const G = pickGlyphs();
+
+const cur = `${CYAN}${G.cursor}${RESET}`;
+const dotActive = `${GREEN}${G.dotActive}${RESET}`;
+const dotStale = `${YELLOW}${G.dotStale}${RESET}`;
+const dotIdle = G.dotIdle;
+const rail = `${DIM}${G.v}${RESET}`;
+const padRight = (s, w) => (s.length >= w ? s : s + " ".repeat(w - s.length));
+
+function selectedAccount(accounts, index) {
+  return accounts.length ? accounts[index] : null;
+}
+
+// Pure renderer: returns the array of lines making up a single frame.
+// opts: { query, mode: "nav"|"search", hint, version }
+export function buildTemplate(accounts, index, opts = {}) {
+  const { query = "", mode = "nav", hint = "", version = "" } = opts;
+  const width = Math.max(24, (process.stdout.columns || 80) - 2);
+  const inner = width - 2; // minus rail columns
+  const text = (s) => clip(s, inner - 1);
+  const lines = [];
+
+  // ── Title bar ────────────────────────────────────────────────────────────
+  const title =
+    `${BOLD}xacc${RESET}${DIM} · Codex account manager${RESET}` +
+    (version ? `${DIM}  v${version}${RESET}` : "");
+  const left = `${G.tl}${G.h} `;
+  const right = ` ${G.tr}`;
+  const filler = Math.max(0, width - displayWidth(left + title + right));
+  lines.push(`${left}${title}${spaceN(filler)}${right}`);
+  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+
+  // ── Toast / hint ─────────────────────────────────────────────────────────
+  if (hint) {
+    lines.push(`${rail} ${CYAN}${text(hint)}${spaceN(Math.max(0, inner - 1 - displayWidth(hint)))}${rail}`);
+    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  }
+
+  // ── List header ──────────────────────────────────────────────────────────
+  const hdr = `${DIM}Accounts${RESET}`;
+  lines.push(`${rail} ${hdr}${spaceN(inner - 1 - displayWidth(hdr))}${rail}`);
+  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+
+  const selected = selectedAccount(accounts, index);
+
+  if (accounts.length === 0 && query.trim()) {
+    const noMatch = `${DIM}no matches for '${query}'${RESET}`;
+    lines.push(`${rail} ${noMatch}${spaceN(inner - 1 - displayWidth(noMatch))}${rail}`);
+    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  } else if (accounts.length === 0) {
+    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  } else {
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i];
+      const rowText = buildRow(acc, i === index);
+      lines.push(`${rail} ${text(rowText)}${spaceN(inner - 1 - displayWidth(rowText))}${rail}`);
+    }
+  }
+
+  // ── Divider + status/info ────────────────────────────────────────────────
+  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  if (mode === "search") {
+    const label = `${CYAN}${UNDERLINE}search${RESET}  ${query}${DIM}|${RESET}`;
+    lines.push(`${rail} ${text(label)}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
+  } else {
+    const info = selected
+      ? `${statusOf(selected)} ${DIM}${G.sep} ${selected.name}${RESET} ${DIM}${G.sep} ${G.enter} to switch${RESET}`
+      : `${DIM}No accounts yet${RESET}`;
+    if (info) lines.push(`${rail} ${text(info)}${spaceN(inner - 1 - displayWidth(info))}${rail}`);
+    else lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  }
+
+  // ── Footer ───────────────────────────────────────────────────────────────
+  lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+  let keys;
+  if (mode === "search") {
+    keys = `${DIM}${G.enter} apply${RESET}   ${DIM}${G.back} clear${RESET}`;
+  } else {
+    keys =
+      `${DIM}${G.up}/${G.down} move${RESET}  ${DIM}${G.enter} switch${RESET}  ${DIM}/ search${RESET}` +
+      `  ${DIM}a add${RESET}  ${DIM}r rename${RESET}  ${DIM}d delete${RESET}  ${DIM}q quit${RESET}`;
+  }
+  lines.push(`${rail} ${text(keys)}${spaceN(inner - 1 - displayWidth(keys))}${rail}`);
+  lines.push(`${G.bl}${G.h.repeat(inner)}${G.br}`);
+
   return lines;
+}
+
+function buildRow(acc, isSelected) {
+  const dot = acc.active
+    ? acc.matched
+      ? dotActive
+      : dotStale
+    : dotIdle;
+  const badge = acc.active
+    ? acc.matched
+      ? `${GREEN}active${RESET}`
+      : `${YELLOW}stale${RESET}`
+    : "";
+  const cursor = isSelected ? cur : " ";
+  const nameField = padRight(` ${acc.name} `, 26);
+  const shown = isSelected ? `${REVERSE}${nameField}${RESET}` : nameField;
+  return `${cursor} ${dot}${shown}${badge ? ` ${badge}` : ""}`;
+}
+
+function statusOf(acc) {
+  if (!acc.active) return `${DIM}inactive${RESET}`;
+  return acc.matched
+    ? `${GREEN}${G.dotActive} active${RESET}`
+    : `${YELLOW}${G.dotStale} current${RESET} ${DIM}(live auth differs)${RESET}`;
+}
+
+function spaceN(n) {
+  return n > 0 ? " ".repeat(n) : "";
+}
+// Approximate display width ignoring ANSI codes.
+function displayWidth(s) {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+// Clip a (possibly ANSI-colored) string to a visible width, preserving codes.
+function clip(s, max) {
+  let out = "";
+  let w = 0;
+  let inEsc = false;
+  for (const ch of s) {
+    if (inEsc) {
+      out += ch;
+      if (ch === "m") inEsc = false;
+      continue;
+    }
+    if (ch === "\x1b") {
+      inEsc = true;
+      out += ch;
+      continue;
+    }
+    if (w >= max) return out + "…";
+    out += ch;
+    w += 1;
+  }
+  return out;
 }
 
 // Prompts a single line of input (cursor shown, raw mode off), then returns
@@ -65,135 +214,176 @@ export function askLine(message) {
 }
 
 export async function selectAccountInteractive() {
-  let accounts = listAccounts().accounts;
+  let full = listAccounts().accounts;
+  let query = "";
+  let mode = "nav";
+  let hint = "";
+  let prevHeight = 0;
+  let finished = false;
 
-  // Empty state: guide, or save the current login as the first account.
-  if (accounts.length === 0) {
+  const innerWidth = () => Math.max(24, (process.stdout.columns || 80) - 2);
+  const visible = () => {
+    if (!query.trim()) return full;
+    const q = query.toLowerCase();
+    return full.filter((a) => a.name.toLowerCase().includes(q));
+  };
+
+  let list = visible();
+  let index = Math.max(0, list.findIndex((a) => a.active));
+
+  // ── Empty-state handling ─────────────────────────────────────────────────
+  if (full.length === 0) {
     if (!isLoggedIn()) {
-      console.log("Not logged in yet. Run 'codex login' first, then 'xacc save <name>'.");
+      if (process.stdin.isTTY) {
+        process.stdout.write(CLEAR_SCREEN);
+        console.log(`${DIM}not logged in${RESET} — run ${CYAN}codex login${RESET} first, then ${CYAN}xacc tui${RESET} again.`);
+        process.exit(0);
+      }
+      console.log("Not logged in yet. Run 'codex login' first, then run 'xacc tui'.");
       return null;
     }
-    if (!process.stdin.isTTY) {
-      console.log(
-        "You are logged in but have no saved accounts. Run 'xacc save <name>' to save the current login."
-      );
-      return null;
+    if (process.stdin.isTTY) {
+      process.stdout.write(CLEAR_SCREEN);
+      console.log(`You're logged in but have no saved accounts yet.`);
+      const answer = await askLine(`Save this login as (default '${suggestAccountName() || "default"}'): `);
+      const name = answer.trim() || suggestAccountName() || "default";
+      try {
+        saveAccount(name);
+        console.log(`${GREEN}✓${RESET} Saved the current login as '${name}'.`);
+      } catch (error) {
+        console.error(`Error: ${error.message}`);
+      }
+      process.exit(0);
     }
-    console.log("You are logged in, but no accounts are saved yet.");
-    const answer = await askLine("Save this login as (default 'default'): ");
-    const name = answer.trim() || "default";
-    saveAccount(name);
-    console.log(`Saved current auth as '${name}'.`);
-    accounts = listAccounts().accounts;
-    if (accounts.length === 0) return null;
+    console.log("You are logged in but no accounts are saved. Run 'xacc save <name>'.");
+    return null;
   }
 
   if (!process.stdin.isTTY) {
     console.log("Recorded accounts (run 'xacc tui' in an interactive terminal to pick):");
-    for (const account of accounts) {
-      console.log(` ${account.active ? "*" : " "} ${account.name}`);
+    for (const account of full) {
+      console.log(` ${account.active ? (account.matched ? "*" : "~") : " "} ${account.name}`);
     }
     return null;
   }
 
-  let index = Math.max(0, accounts.findIndex((a) => a.active));
-  let busy = false;
-  let finished = false;
-  let blockHeight = 0;
-  let hint = "";
-
-  const redrawInPlace = () => {
-    const block = buildTemplate(accounts, index, hint);
-    process.stdout.write(MOVE_UP.repeat(blockHeight));
-    process.stdout.write(ERASE_LINE);
-    for (const line of block) {
-      process.stdout.write(`${line}${ERASE_LINE}\n`);
+  // ── Rendering ────────────────────────────────────────────────────────────
+  const render = () => {
+    // Move cursor back to the top-left of the previous frame and redraw,
+    // erasing any lines that are no longer part of the frame.
+    if (prevHeight) process.stdout.write(MOVE_UP.repeat(prevHeight));
+    process.stdout.write(GOTO_COL);
+    const frame = buildTemplate(visible(), index, { query, mode, hint, version });
+    const height = frame.length;
+    const total = Math.max(height, prevHeight);
+    for (let i = 0; i < total; i++) {
+      process.stdout.write(`${i < height ? frame[i] : ""}${ERASE_LINE}${i < total - 1 ? "\n" : ""}`);
     }
-    blockHeight = block.length;
+    prevHeight = height;
   };
 
-  const redrawFull = () => {
+  const renderClean = () => {
     process.stdout.write(CLEAR_SCREEN);
-    const block = buildTemplate(accounts, index, hint);
-    for (const line of block) {
-      process.stdout.write(`${line}\n`);
+    prevHeight = 0;
+    render();
+  };
+
+  const refreshList = () => {
+    list = visible();
+    index = Math.max(0, Math.min(index, list.length - 1));
+  };
+
+  // Erases the frame currently on screen (leaves the cursor right below it).
+  const clearFrame = () => {
+    if (prevHeight > 0) {
+      process.stdout.write(MOVE_UP.repeat(prevHeight));
+      for (let i = 0; i < prevHeight; i++) {
+        process.stdout.write(`${ERASE_LINE}${i < prevHeight - 1 ? "\n" : ""}`);
+      }
+      prevHeight = 0;
     }
-    blockHeight = block.length;
   };
 
-  const refresh = () => {
-    accounts = listAccounts().accounts;
-    index = Math.max(0, Math.min(index, accounts.length - 1));
-  };
-
-  const resume = () => {
-    busy = false;
-    process.stdout.write(HIDE_CURSOR);
-    redrawFull();
-  };
-
+  // ── Flows that leave the picker (prompt input) ───────────────────────────
   const suspend = () => {
+    clearFrame();
     process.stdout.write(SHOW_CURSOR);
     process.stdin.setRawMode(false);
   };
+  const resume = (msg) => {
+    hint = msg || "";
+    refreshList();
+    renderClean();
+    process.stdout.write(HIDE_CURSOR);
+  };
 
   const addFlow = async () => {
-    busy = true;
     suspend();
-    process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
     console.log(`${DIM}Running 'codex login'... complete the login in your browser.${RESET}`);
     const { ok } = await runCodexLogin();
     if (!ok) {
-      hint = "Could not run 'codex login' (is Codex installed?).";
-      resume();
+      resume(`Could not run 'codex login' (is Codex installed?).`);
       return;
     }
-    const suggested = suggestAccountName();
-    const answer = await askLine(`Save this login as (default '${suggested || "default"}'): `);
-    const name = answer.trim() || suggested || "default";
+    const suggested = suggestAccountName() || "default";
+    const answer = await askLine(`Save this login as (default '${suggested}'): `);
+    const name = answer.trim() || suggested;
     try {
-      saveAccount(name);
-      hint = `Saved '${name}'.`;
+      const { overwritten } = saveAccount(name);
+      full = listAccounts().accounts;
+      resume(`${GREEN}✓${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
     } catch (error) {
-      hint = error.message;
+      resume(`${error.message}`);
     }
-    refresh();
-    resume();
   };
 
   const renameFlow = async () => {
-    busy = true;
+    const current = list[index];
+    if (!current) return;
     suspend();
-    const oldName = accounts[index].name;
-    const answer = await askLine(`Rename '${oldName}' to: `);
+    const answer = await askLine(`Rename '${current.name}' to: `);
     const newName = answer.trim();
-    if (newName && newName !== oldName) {
+    if (newName && newName !== current.name) {
       try {
-        renameAccount(oldName, newName);
-        hint = `Renamed '${oldName}' -> '${newName}'.`;
+        renameAccount(current.name, newName);
+        full = listAccounts().accounts;
+        resume(`${GREEN}✓${RESET} Renamed '${current.name}' -> '${newName}'.`);
       } catch (error) {
-        hint = error.message;
+        resume(`${error.message}`);
       }
+    } else {
+      resume();
     }
-    refresh();
-    resume();
   };
 
   const deleteFlow = async () => {
-    busy = true;
+    const current = list[index];
+    if (!current) return;
     suspend();
-    const name = accounts[index].name;
-    const answer = await askLine(`Delete '${name}'? (y/N): `);
+    const answer = await askLine(`Delete '${current.name}'? (y/N): `);
     if (answer.trim().toLowerCase() === "y") {
       try {
-        removeAccount(name);
-        hint = `Deleted '${name}'.`;
+        removeAccount(current.name);
+        full = listAccounts().accounts;
+        resume(`${GREEN}✓${RESET} Deleted '${current.name}'.`);
       } catch (error) {
-        hint = error.message;
+        resume(`${error.message}`);
       }
+    } else {
+      resume();
     }
-    refresh();
-    resume();
+  };
+
+  const doSwitch = (name) => {
+    try {
+      switchAccount(name);
+      clearFrame();
+      console.log(`${GREEN}●${RESET} Switched to '${name}' — restart Codex if it is running.`);
+      finish(name);
+    } catch (error) {
+      hint = error.message;
+      render();
+    }
   };
 
   return new Promise((resolvePicker) => {
@@ -216,30 +406,52 @@ export async function selectAccountInteractive() {
         cleanup();
         process.exit(130);
       }
-      if (busy) return;
+
+      if (mode === "search") {
+        if (key.name === "escape" || (key.name === "return" || key.name === "enter")) {
+          mode = "nav";
+          refreshList();
+          render();
+        } else if (key.name === "backspace") {
+          query = query.slice(0, -1);
+          refreshList();
+          render();
+        } else if (str && /^[\x20-\x7e]$/.test(str)) {
+          query += str;
+          refreshList();
+          render();
+        }
+        return;
+      }
+
       switch (key.name) {
         case "up":
-          index = (index - 1 + accounts.length) % accounts.length;
-          redrawInPlace();
+          if (list.length) {
+            index = (index - 1 + list.length) % list.length;
+            hint = "";
+            render();
+          }
           break;
         case "down":
-          index = (index + 1) % accounts.length;
-          redrawInPlace();
+          if (list.length) {
+            index = (index + 1) % list.length;
+            hint = "";
+            render();
+          }
           break;
         case "return":
         case "enter": {
-          const name = accounts[index].name;
-          try {
-            switchAccount(name);
-            console.log(`Switched to '${name}'.`);
-            console.log("Restart Codex if it is already running.");
-            finish(name);
-          } catch (error) {
-            console.error(`Error: ${error.message}`);
-            finish(null);
-          }
+          const current = list[index];
+          if (current) doSwitch(current.name);
           break;
         }
+        case "/":
+          if (full.length) {
+            mode = "search";
+            query = "";
+            render();
+          }
+          break;
         case "a":
           addFlow();
           break;
@@ -261,6 +473,6 @@ export async function selectAccountInteractive() {
     process.stdin.resume();
     process.stdout.write(HIDE_CURSOR);
     process.stdin.on("keypress", onKeypress);
-    redrawInPlace();
+    renderClean();
   });
 }
