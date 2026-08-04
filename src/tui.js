@@ -10,6 +10,7 @@ import {
   removeAccount,
   renameAccount,
   saveAccount,
+  sharedWorkspaceOf,
   suggestAccountName,
   switchAccount,
 } from "./core.js";
@@ -22,7 +23,6 @@ const version = require("../package.json").version;
 // ── ANSI control sequences ────────────────────────────────────────────────
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
-const UNDERLINE = "\x1b[4m";
 const ERASE_LINE = "\x1b[K";
 const MOVE_UP = "\x1b[1A";
 const GOTO_COL = "\x1b[G";
@@ -90,12 +90,161 @@ function selectedAccount(accounts, index) {
   return accounts.length ? accounts[index] : null;
 }
 
-// Pure renderer: returns the array of lines making up a single frame.
-// opts: { query, mode: "nav"|"search", hint, version, usageLoading }
-export function buildTemplate(accounts, index, opts = {}) {
-  const { query = "", mode = "nav", hint = "", version = "", usageLoading = false } = opts;
-  const width = Math.max(24, (process.stdout.columns || 80) - 2);
+// ── Pure renderer ───────────────────────────────────────────────────────────
+// Geometry is passed in explicitly ({ columns, rows }) instead of reading
+// process.stdout directly, so frames can be snapshot-tested at any size.
+
+const MAX_FRAME_WIDTH = 88;
+const MIN_FRAME_WIDTH = 24;
+const DETAIL_ROWS = 4; // reserved usage-panel rows (keeps frame height stable)
+
+function computeLayout(columns, rows) {
+  const width = Math.max(MIN_FRAME_WIDTH, Math.min(columns - 2, MAX_FRAME_WIDTH));
   const inner = width - 2; // minus rail columns
+  // >=76 cols: email inline on the account row; 48-75: email on a second
+  // line; <48: email hidden from the list (shown only in the detail panel).
+  const emailInline = columns >= 76;
+  const showListEmail = columns >= 48;
+  return { width, inner, columns, rows, emailInline, showListEmail };
+}
+
+function statusLabel(acc) {
+  if (!acc.active) return { text: "SAVED", color: T.faint };
+  if (acc.matched) return { text: "CURRENT", color: T.ok };
+  return { text: "AUTH CHANGED", color: T.warn };
+}
+
+function planText(acc) {
+  const plan = usagePlanLabel(acc);
+  return plan ? `${T.dim}${plan.toUpperCase()}${RESET}` : "";
+}
+
+// Returns the scroll offset that keeps `index` visible inside a `pageSize`
+// window, centered when possible. Pure so it is easily unit-tested.
+function scrollStart(accounts, index, pageSize) {
+  if (!accounts.length || pageSize <= 0) return 0;
+  const maxStart = Math.max(0, accounts.length - pageSize);
+  return Math.max(0, Math.min(index - Math.floor((pageSize - 1) / 2), maxStart));
+}
+
+// Renders one account as 1 line (email inline or hidden) or 2 lines (email on
+// its own second line): cursor + status dot + name [+ email] [+ plan] on the
+// left, status badge right-aligned.
+function renderAccountRow(acc, isSelected, ctx) {
+  const { inner, emailInline, showListEmail } = ctx;
+  const avail = inner - 2;
+  const cursor = isSelected ? cur : " ";
+  const nameColor = isSelected ? T.accent : acc.active ? T.bright : DIM;
+  const name = `${nameColor}${acc.name}${RESET}`;
+  const emailInlineStr = emailInline && acc.email ? `${DIM}  ${acc.email}${RESET}` : "";
+  const plan = planText(acc);
+  const badge = statusLabel(acc);
+  const badgeText = `${badge.color}${badge.text}${RESET}`;
+  const left = `${cursor}${dotOf(acc)} ${name}${emailInlineStr}${plan ? ` ${plan}` : ""}`;
+  const pad = Math.max(0, avail - displayWidth(left) - (1 + displayWidth(badgeText)));
+  const line1 = `${left}${spaceN(pad)} ${badgeText}`;
+  if (!emailInline && showListEmail && acc.email) {
+    const indent = displayWidth(`${cursor}${dotOf(acc)} ${name}`);
+    const line2 = `${" ".repeat(indent)}${DIM}${acc.email}${RESET}`;
+    return [line1, line2];
+  }
+  return [line1];
+}
+
+// The usage / detail panel: a labeled divider plus a fixed-height content area
+// so the frame height never jumps between selections.
+function renderDetailPanel(acc, ctx, opts) {
+  const { inner, showListEmail } = ctx;
+  const line = ctx.line;
+  const blank = ctx.blank;
+  const lines = [];
+  const divider = (label) => {
+    const body = label ? `─ ${label}` : "─";
+    const fill = Math.max(0, inner - displayWidth(body) - 1);
+    return `${T.faint}${G.v}${G.h}${body}${G.h.repeat(fill)}${G.v}${RESET}`;
+  };
+
+  const content = [];
+  if (acc) {
+    // Below 48 cols the email is hidden from the list, so surface it here.
+    if (!showListEmail && acc.email) content.push(`${DIM}${acc.email}${RESET}`);
+    const usage = acc.usage;
+    if (usage && !usage.error) {
+      const primary = pctOrDash(usage.primary);
+      const secondary = pctOrDash(usage.secondary);
+      const credits =
+        usage.credits && typeof usage.credits.usedPercent === "number"
+          ? usage.credits.usedPercent
+          : null;
+      if (primary != null)
+        content.push(`${DIM}${windowLabel(usage.primary.windowSeconds)}${RESET}  ${bar(primary)} ${DIM}used${RESET}`);
+      if (secondary != null)
+        content.push(`${DIM}${windowLabel(usage.secondary.windowSeconds)}${RESET}  ${bar(secondary)} ${DIM}used${RESET}`);
+      if (credits != null)
+        content.push(`${DIM}credits${RESET}  ${bar(credits)} ${DIM}used${RESET}`);
+      if (primary == null && secondary == null && credits == null)
+        content.push(`${DIM}no usage data${RESET}`);
+    } else if (usage && usage.error) {
+      content.push(`${DIM}usage unavailable${RESET}`);
+    } else if (opts.usageLoading) {
+      content.push(`${DIM}fetching usage${G.ellipsis}${RESET}`);
+    } else {
+      content.push(`${DIM}no usage data yet${RESET}`);
+    }
+    if (opts.usageUpdatedAt) {
+      content.push(`${DIM}Updated${RESET}  ${relativeTime(opts.usageUpdatedAt)}`);
+    } else if (acc.lastActivity) {
+      content.push(`${DIM}last activity${RESET}  ${relativeTime(acc.lastActivity)}`);
+    }
+  }
+
+  lines.push(divider(acc ? `Usage · ${acc.name}` : ""));
+  for (let i = 0; i < DETAIL_ROWS; i++) {
+    lines.push(content[i] ? line(content[i]) : blank());
+  }
+  lines.push(blank());
+  return lines;
+}
+
+// The two key-hint footer lines for list (nav / search) modes.
+function renderFooter(mode, ctx) {
+  const { inner } = ctx;
+  const line = ctx.line;
+  const compact = inner < 44;
+  const sep = compact ? `${DIM}  ${RESET}` : `${T.faint} ${G.sep} ${RESET}`;
+  const D = (s) => `${DIM}${s}${RESET}`;
+  if (mode === "search") {
+    return [
+      line(`${D(G.enter)} apply${sep}${D(G.back)} clear${sep}${D("Esc")} ${compact ? "back" : "back to list"}`),
+      line(`${D("a-z")} ${compact ? "filter" : "type to filter"}${sep}${D(G.up)}/${D(G.down)} move${sep}${D("Enter")} switch`),
+    ];
+  }
+  return [
+    line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("/")} search`),
+    line(`${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
+  ];
+}
+
+export function buildTemplate(accounts, index, opts = {}) {
+  const {
+    query = "",
+    mode = "nav",
+    hint = "",
+    version = "",
+    usageLoading = false,
+    usageUpdatedAt = null,
+    columns = process.stdout.columns || 80,
+    rows = process.stdout.rows || 24,
+    input = "",
+    addStep = 1,
+    addMethod = "browser",
+    confirmName = "",
+    suggested = "default",
+    totalCount = accounts.length,
+  } = opts;
+
+  const layout = computeLayout(columns, rows);
+  const { width, inner, emailInline, showListEmail } = layout;
   // Clips to inner-2 so the appended ellipsis still fits within the frame.
   const text = (s) => clip(s, inner - 2);
   // A fully-padded content line: rail + content + fill + rail, always `width` wide.
@@ -104,12 +253,15 @@ export function buildTemplate(accounts, index, opts = {}) {
     return `${rail} ${t}${spaceN(Math.max(0, inner - 1 - displayWidth(t)))}${rail}`;
   };
   const blank = () => `${rail} ${" ".repeat(inner - 1)}${rail}`;
+  const ctx = { ...layout, text, line, blank, sep: `${T.faint} ${G.sep} ${RESET}` };
   const lines = [];
 
   // ── Title bar ────────────────────────────────────────────────────────────
+  const countLabel =
+    mode === "search" && query.trim() ? `${accounts.length}/${totalCount}` : String(totalCount);
   const left = `${T.faint}${G.tl}${G.h} ${RESET}`;
   const right = `${T.faint} ${G.tr}${RESET}`;
-  let titleText = `${BOLD}xacc${RESET}${T.faint} ${G.sep} Codex account manager${RESET}`;
+  let titleText = `${BOLD}xacc${RESET}${T.faint} ${G.sep} Accounts ${countLabel}${RESET}`;
   const budget = width - displayWidth(left + right);
   // Drop the version suffix, then clip, so the top border never exceeds the frame.
   if (version && displayWidth(titleText + `${T.faint}  v${version}${RESET}`) <= budget) {
@@ -119,95 +271,122 @@ export function buildTemplate(accounts, index, opts = {}) {
   lines.push(`${left}${titleText}${spaceN(budget - displayWidth(titleText))}${right}`);
   lines.push(blank());
 
-  // ── Toast / hint ─────────────────────────────────────────────────────────
-  if (hint) {
-    lines.push(line(`${T.accent}${hint}${RESET}`));
-    lines.push(blank());
-  }
-
-  // ── List header ──────────────────────────────────────────────────────────
-  lines.push(line(`${DIM}Accounts${RESET}`));
+  // ── Toast / search status ────────────────────────────────────────────────
+  // Always reserve this single line so the frame height never changes when a
+  // toast or the search status appears or disappears. Search mode claims it,
+  // otherwise it shows the hint (or stays blank).
+  lines.push(
+    mode === "search"
+      ? line(`${T.accent}search${RESET}${T.faint}|${RESET} ${query}${T.faint}_${RESET}`)
+      : hint
+        ? line(`${T.accent}${hint}${RESET}`)
+        : blank()
+  );
   lines.push(blank());
 
+  const isModal = mode === "add" || mode === "rename" || mode === "delete";
+  if (isModal) {
+    renderModal(lines, ctx, { mode, input, addStep, addMethod, confirmName, suggested });
+    lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
+    return lines;
+  }
+
+  // ── Account list (paginated to the terminal height) ──────────────────────
+  const lpa = emailInline || !showListEmail ? 1 : 2; // lines per account
+  // Rows consumed by everything outside the scrollable list: title, spacer,
+  // reserved toast/search line, list spacer, detail panel, footer, borders.
+  const fixed = 1 + 1 + 1 + 1 + (1 + DETAIL_ROWS + 1) + 2 + 1;
+  const pageSize = Math.max(1, Math.floor((rows - fixed) / lpa));
   const selected = selectedAccount(accounts, index);
 
-  if (accounts.length === 0 && query.trim()) {
+  if (accounts.length === 0) {
     lines.push(line(`${DIM}no matches for '${query}'${RESET}`));
-    lines.push(blank());
-  } else if (accounts.length === 0) {
-    lines.push(blank());
-    lines.push(blank());
   } else {
-    for (let i = 0; i < accounts.length; i++) {
-      lines.push(line(rowOf(accounts[i], i === index, inner - 2)));
+    const start = scrollStart(accounts, index, pageSize);
+    let rendered = 0;
+    for (let i = start; i < accounts.length && rendered < pageSize * lpa; i++) {
+      const rowLines = renderAccountRow(accounts[i], i === index, ctx);
+      for (const rl of rowLines) {
+        lines.push(line(rl));
+        rendered++;
+      }
+    }
+    while (rendered < pageSize * lpa) {
+      lines.push(blank());
+      rendered++;
     }
   }
 
-  // ── Divider + status/info ────────────────────────────────────────────────
-  lines.push(blank());
-  if (mode === "search") {
-    lines.push(line(`${T.accent}${UNDERLINE}search${RESET}  ${query}${T.faint}|${RESET}`));
-  } else if (selected) {
-    const detail = buildDetail(selected, usageLoading);
-    if (detail) {
-      for (const d of detail) lines.push(line(d));
-    } else {
-      lines.push(blank());
-    }
-  } else {
-    lines.push(line(`${DIM}No accounts yet${RESET}`));
+  // ── Detail / usage panel ─────────────────────────────────────────────────
+  for (const d of renderDetailPanel(selected, ctx, { usageLoading, usageUpdatedAt, query })) {
+    lines.push(d);
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
-  lines.push(blank());
-  const sep = `${T.faint} ${G.sep} ${RESET}`;
-  let keys;
-  if (mode === "search") {
-    keys = `${DIM}${G.enter} apply${RESET}${sep}${DIM}${G.back} clear${RESET}`;
-  } else {
-    keys =
-      `${DIM}${G.up}/${G.down} move${RESET}${sep}` +
-      `${DIM}${G.enter} switch${RESET}${sep}` +
-      `${DIM}/ search${RESET}${sep}` +
-      `${DIM}a add${RESET}${sep}` +
-      `${DIM}r rename${RESET}${sep}` +
-      `${DIM}d delete${RESET}${sep}` +
-      `${DIM}q quit${RESET}`;
+  for (const f of renderFooter(mode, ctx)) {
+    lines.push(f);
   }
-  lines.push(line(keys));
   lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
 
   return lines;
 }
 
+// Inline modal frames for add / rename / delete that replace the old
+// suspend()/askLine() flow with in-frame prompts.
+function renderModal(lines, ctx, o) {
+  const line = ctx.line;
+  const blank = ctx.blank;
+  const D = (s) => `${DIM}${s}${RESET}`;
+
+  if (o.mode === "add") {
+    if (o.addStep === 1) {
+      lines.push(line(`${T.accent}Add account · Step 1 of 2${RESET}`));
+      lines.push(blank());
+      for (const m of ["browser", "device"]) {
+        const sel = m === o.addMethod;
+        const label = m === "browser" ? "Browser login" : "Device-code login";
+        const detail = m === "browser" ? "interactive, opens your browser" : "headless, paste a code on another device";
+        lines.push(line(`${sel ? cur : " "} ${sel ? T.accent : DIM}${label}${RESET}${D(`  ${detail}`)}`));
+        lines.push(blank());
+      }
+      lines.push(line(`${D(G.enter)} continue${ctx.sep}${D("Esc")} cancel`));
+      lines.push(line(`${D(G.up)}/${D(G.down)} choose method`));
+    } else {
+      lines.push(line(`${T.accent}Add account · Step 2 of 2${RESET}`));
+      lines.push(blank());
+      lines.push(line(`${DIM}Save this login as:${RESET}`));
+      lines.push(blank());
+      const shown = o.input ? o.input : D(`(default: ${o.suggested})`);
+      lines.push(line(`${T.accent}>${RESET} ${shown}${T.accent}_${RESET}`));
+      lines.push(blank());
+      lines.push(line(`${D(G.enter)} save${ctx.sep}${D("Esc")} back to method`));
+    }
+    return;
+  }
+
+  if (o.mode === "rename") {
+    lines.push(line(`${T.accent}Rename account${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${DIM}New name:${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${T.accent}>${RESET} ${o.input}${T.accent}_${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${D(G.enter)} rename${ctx.sep}${D("Esc")} cancel`));
+    return;
+  }
+
+  // delete
+  lines.push(line(`${T.accent}Delete account${RESET}`));
+  lines.push(blank());
+  lines.push(line(`${DIM}Delete '${o.confirmName}'?${RESET}`));
+  lines.push(blank());
+  lines.push(line(`${DIM}Removes the saved auth snapshot. The live login is untouched.${RESET}`));
+  lines.push(blank());
+  lines.push(line(`${T.ok}y${RESET} yes${ctx.sep}${D("n")} no${ctx.sep}${D("Esc")} cancel`));
+}
+
 function dotOf(acc) {
   return acc.active ? (acc.matched ? dotActive : dotStale) : dotIdle;
-}
-
-// Renders one account row: cursor + status dot + name (+ email) on the left,
-// status badge right-aligned. Selection is indicated by an accent cursor and
-// accent name — no background block.
-function rowOf(acc, isSelected, avail) {
-  const cursor = isSelected ? cur : " ";
-  const nameColor = isSelected ? T.accent : acc.active ? T.bright : DIM;
-  const name = `${nameColor}${acc.name}${RESET}`;
-  const email = acc.email ? `${DIM}  ${acc.email}${RESET}` : "";
-  const badge = acc.active
-    ? acc.matched
-      ? `${T.ok}active${RESET}`
-      : `${T.warn}stale${RESET}`
-    : "";
-  const left = `${cursor}${dotOf(acc)} ${name}${email}`;
-  const badgeGap = badge ? 1 + displayWidth(badge) : 0;
-  const pad = Math.max(0, avail - displayWidth(left) - badgeGap);
-  return `${left}${spaceN(pad)}${badge ? ` ${badge}` : ""}`;
-}
-
-function statusOf(acc) {
-  if (!acc.active) return `${DIM}inactive${RESET}`;
-  return acc.matched
-    ? `${T.ok}${G.dotActive} active${RESET}`
-    : `${T.warn}${G.dotStale} current${RESET} ${DIM}(live auth differs)${RESET}`;
 }
 
 // A 10-cell usage bar. The fill color follows the limit: healthy, high, then
@@ -243,35 +422,6 @@ function usagePlanLabel(acc) {
   if (usage && !usage.error && usage.plan) return planLabel(usage.plan);
   if (acc.plan) return planLabel(acc.plan);
   return null;
-}
-
-// The detail lines shown beneath the account list for the selected account:
-// status, plan, 5h / weekly usage bars, and last activity time.
-function buildDetail(acc, usageLoading) {
-  if (!acc) return null;
-  const parts = [];
-  parts.push(statusOf(acc));
-
-  const plan = usagePlanLabel(acc);
-  if (plan) parts.push(`${DIM}${G.sep}${RESET} ${T.accent}${plan}${RESET}`);
-
-  const usage = acc.usage;
-  if (usage && !usage.error) {
-    const primary = pctOrDash(usage.primary);
-    const secondary = pctOrDash(usage.secondary);
-    if (primary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.primary.windowSeconds)} used${RESET} ${bar(primary)}`);
-    if (secondary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.secondary.windowSeconds)} used${RESET} ${bar(secondary)}`);
-    if (primary == null && secondary == null) parts.push(`${DIM}${G.sep} no usage data${RESET}`);
-  } else if (usage && usage.error) {
-    parts.push(`${DIM}${G.sep} usage unavailable${RESET}`);
-  } else if (usageLoading) {
-    parts.push(`${DIM}${G.sep} fetching usage${G.ellipsis}${RESET}`);
-  }
-
-  const details = [parts.join(" ")];
-  const activity = relativeTime(acc.lastActivity);
-  if (activity) details.push(`${DIM}last activity: ${activity}${RESET}`);
-  return details;
 }
 
 function relativeTime(ms) {
@@ -356,11 +506,19 @@ export async function selectAccountInteractive() {
     });
   let full = load();
   let usageLoading = false;
+  let usageUpdatedAt = null;
   let query = "";
   let mode = "nav";
   let hint = "";
   let prevHeight = 0;
   let finished = false;
+
+  // Inline-prompt (modal) state for the add / rename / delete flows.
+  let input = "";
+  let addStep = 1;
+  let addMethod = "browser";
+  let confirmName = "";
+  let suggested = "default";
 
   const visible = () => {
     if (!query.trim()) return full;
@@ -414,7 +572,20 @@ export async function selectAccountInteractive() {
     // erasing any lines that are no longer part of the frame.
     if (prevHeight) process.stdout.write(MOVE_UP.repeat(prevHeight));
     process.stdout.write(GOTO_COL);
-    const frame = buildTemplate(visible(), index, { query, mode, hint, version, usageLoading });
+    const frame = buildTemplate(visible(), index, {
+      query,
+      mode,
+      hint,
+      version,
+      usageLoading,
+      usageUpdatedAt,
+      input,
+      addStep,
+      addMethod,
+      confirmName,
+      suggested,
+      totalCount: full.length,
+    });
     const height = frame.length;
     const total = Math.max(height, prevHeight);
     for (let i = 0; i < total; i++) {
@@ -440,6 +611,7 @@ export async function selectAccountInteractive() {
     if (!targets.length) return;
     usageAbort = new AbortController();
     usageLoading = true;
+    usageUpdatedAt = null;
     render();
     const map = await fetchAllUsages(targets, { signal: usageAbort.signal });
     if (finished) return;
@@ -447,6 +619,7 @@ export async function selectAccountInteractive() {
     for (const a of full) {
       if (map[a.name]) a.usage = map[a.name];
     }
+    usageUpdatedAt = Date.now();
     render();
   };
 
@@ -466,83 +639,105 @@ export async function selectAccountInteractive() {
     }
   };
 
-  // ── Flows that leave the picker (prompt input) ───────────────────────────
+  // ── Flows that leave the picker (external process) ───────────────────────
   const suspend = () => {
     clearFrame();
     process.stdout.write(SHOW_CURSOR);
     process.stdin.setRawMode(false);
   };
-  const resume = (msg) => {
+  const backToPicker = (msg) => {
     hint = msg || "";
-    refreshList();
     renderClean();
     process.stdout.write(HIDE_CURSOR);
-    // Re-establish the keypress pipeline in case askLine's readline interface
-    // disturbed stdin; otherwise the picker stops responding after a prompt.
+    // Re-establish the keypress pipeline after an external process disturbed
+    // stdin; otherwise the picker stops responding.
     readline.emitKeypressEvents(process.stdin);
     process.stdin.resume();
   };
 
-  const addFlow = async () => {
+  // Add · step 1 → run the real 'codex login' (browser or device-code), then
+  // advance to the in-frame name prompt.
+  const runLogin = async () => {
     suspend();
-    console.log(`${DIM}Running 'codex login'... complete the login in your browser.${RESET}`);
-    const { ok } = await runCodexLogin();
+    const device = addMethod === "device";
+    console.log(
+      device
+        ? "Running 'codex login --device-auth'... open the shown URL on any device."
+        : "Running 'codex login'... complete the login in your browser."
+    );
+    const { ok } = await runCodexLogin("codex", ["login", ...(device ? ["--device-auth"] : [])]);
     if (!ok) {
-      resume(`Could not run 'codex login' (is Codex installed?).`);
+      addStep = 1;
+      backToPicker(`Could not run 'codex login' (is Codex installed? did the login succeed?).`);
       return;
     }
-    const suggested = suggestAccountName() || "default";
-    const answer = await askLine(`Save this login as (default '${suggested}'): `);
-    const name = answer.trim() || suggested;
+    full = load();
+    suggested = suggestAccountName() || "default";
+    input = suggested === "default" ? "" : suggested;
+    addStep = 2;
+    backToPicker();
+  };
+
+  const saveNewAccount = () => {
+    const name = (input.trim() || suggested || "default").trim();
     try {
       const { overwritten } = saveAccount(name);
       full = load();
       const dup = duplicateAccountOf(name);
-      resume(
+      const ws = sharedWorkspaceOf(name);
+      mode = "nav";
+      refreshList();
+      backToPicker(
         `${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}` +
-          (dup ? ` ${T.warn}${G.dotStale}${RESET} same ChatGPT account as '${dup}'` : "")
+          (dup ? ` ${T.warn}${G.dotStale}${RESET} Already saved as '${dup}'.` : "") +
+          (ws ? ` ${T.warn}${G.dotStale}${RESET} Shared workspace with '${ws}'.` : "")
       );
       refreshUsage();
     } catch (error) {
-      resume(`${error.message}`);
+      hint = error.message;
+      render();
     }
   };
 
-  const renameFlow = async () => {
+  const doRename = () => {
     const current = list[index];
-    if (!current) return;
-    suspend();
-    const answer = await askLine(`Rename '${current.name}' to: `);
-    const newName = answer.trim();
-    if (newName && newName !== current.name) {
-      try {
-        renameAccount(current.name, newName);
-        full = load();
-        resume(`${T.ok}${G.check}${RESET} Renamed '${current.name}' -> '${newName}'.`);
-      } catch (error) {
-        resume(`${error.message}`);
-      }
-    } else {
-      resume();
+    const newName = input.trim();
+    if (!newName || newName === current.name) {
+      mode = "nav";
+      backToPicker();
+      return;
+    }
+    try {
+      renameAccount(current.name, newName);
+      full = load();
+      mode = "nav";
+      refreshList();
+      backToPicker(`${T.ok}${G.check}${RESET} Renamed '${current.name}' -> '${newName}'.`);
+    } catch (error) {
+      hint = error.message;
+      render();
     }
   };
 
-  const deleteFlow = async () => {
-    const current = list[index];
-    if (!current) return;
-    suspend();
-    const answer = await askLine(`Delete '${current.name}'? (y/N): `);
-    if (answer.trim().toLowerCase() === "y") {
-      try {
-        removeAccount(current.name);
-        full = load();
-        resume(`${T.ok}${G.check}${RESET} Deleted '${current.name}'.`);
-      } catch (error) {
-        resume(`${error.message}`);
-      }
-    } else {
-      resume();
+  const doDelete = () => {
+    try {
+      removeAccount(confirmName);
+      full = load();
+      mode = "nav";
+      refreshList();
+      backToPicker(`${T.ok}${G.check}${RESET} Deleted '${confirmName}'.`);
+    } catch (error) {
+      mode = "nav";
+      refreshList();
+      backToPicker(error.message);
     }
+  };
+
+  const moveIndex = (delta) => {
+    if (!list.length) return;
+    index = (index + delta + list.length) % list.length;
+    hint = "";
+    render();
   };
 
   return new Promise((resolvePicker) => {
@@ -567,13 +762,17 @@ export async function selectAccountInteractive() {
     const doSwitch = (name) => {
       try {
         switchAccount(name);
-        // Keep the frame on screen; print the confirmation below it and stop
-        // any background redraw (refreshUsage) from painting over it.
-        finished = true;
-        usageAbort.abort();
-        process.stdout.write(SHOW_CURSOR);
-        console.log(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
-        finish(name);
+        // Stay in the picker so the user can switch again in the same session.
+        // Reload the list to repaint the new active account, then fetch its
+        // usage; the confirmation is shown as a toast on the frame.
+        full = load();
+        if (!query.trim()) {
+          const newActive = full.findIndex((a) => a.active);
+          if (newActive >= 0) index = newActive;
+        }
+        refreshList();
+        backToPicker(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
+        refreshUsage();
       } catch (error) {
         hint = error.message;
         render();
@@ -585,6 +784,60 @@ export async function selectAccountInteractive() {
       if (key.ctrl && key.name === "c") {
         finish(null);
         process.exitCode = 130;
+        return;
+      }
+
+      // ── Modal modes (add / rename / delete) ─────────────────────────────
+      if (mode === "add") {
+        if (addStep === 1) {
+          if (key.name === "up" || key.name === "down") {
+            addMethod = addMethod === "browser" ? "device" : "browser";
+            render();
+          } else if (key.name === "return" || key.name === "enter") {
+            runLogin();
+          } else if (key.name === "escape") {
+            mode = "nav";
+            render();
+          }
+        } else {
+          if (key.name === "escape") {
+            addStep = 1;
+            hint = "";
+            render();
+          } else if (key.name === "return" || key.name === "enter") {
+            saveNewAccount();
+          } else if (key.name === "backspace") {
+            input = input.slice(0, -1);
+            render();
+          } else if (str && /^[\x20-\x7e]$/.test(str)) {
+            input += str;
+            render();
+          }
+        }
+        return;
+      }
+      if (mode === "rename") {
+        if (key.name === "escape") {
+          mode = "nav";
+          render();
+        } else if (key.name === "return" || key.name === "enter") {
+          doRename();
+        } else if (key.name === "backspace") {
+          input = input.slice(0, -1);
+          render();
+        } else if (str && /^[\x20-\x7e]$/.test(str)) {
+          input += str;
+          render();
+        }
+        return;
+      }
+      if (mode === "delete") {
+        if (key.name === "y" || key.name === "return" || key.name === "enter") {
+          doDelete();
+        } else if (key.name === "n" || key.name === "escape") {
+          mode = "nav";
+          render();
+        }
         return;
       }
 
@@ -607,18 +860,10 @@ export async function selectAccountInteractive() {
 
       switch (key.name) {
         case "up":
-          if (list.length) {
-            index = (index - 1 + list.length) % list.length;
-            hint = "";
-            render();
-          }
+          moveIndex(-1);
           break;
         case "down":
-          if (list.length) {
-            index = (index + 1) % list.length;
-            hint = "";
-            render();
-          }
+          moveIndex(1);
           break;
         case "return":
         case "enter": {
@@ -634,14 +879,34 @@ export async function selectAccountInteractive() {
           }
           break;
         case "a":
-          addFlow();
+          if (full.length) {
+            mode = "add";
+            addStep = 1;
+            addMethod = "browser";
+            hint = "";
+            render();
+          }
           break;
-        case "r":
-          renameFlow();
+        case "r": {
+          const current = list[index];
+          if (current) {
+            mode = "rename";
+            input = current.name;
+            hint = "";
+            render();
+          }
           break;
-        case "d":
-          deleteFlow();
+        }
+        case "d": {
+          const current = list[index];
+          if (current) {
+            mode = "delete";
+            confirmName = current.name;
+            hint = "";
+            render();
+          }
           break;
+        }
         case "q":
         case "escape":
           finish(null);

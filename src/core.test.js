@@ -17,6 +17,7 @@ import {
   removeAccount,
   renameAccount,
   saveAccount,
+  sharedWorkspaceOf,
   suggestAccountName,
   switchAccount,
 } from "./core.js";
@@ -232,6 +233,43 @@ test("duplicateAccountOf distinguishes users by id_token identity, not account_i
   saveAccount("sans-id");
   assert.equal(duplicateAccountOf("sans-id"), null);
   assert.equal(duplicateAccountOf("does-not-exist"), null);
+});
+
+test("sharedWorkspaceOf reports same workspace account_id but a different user", (t) => {
+  setup(t);
+  const payload = (claims) =>
+    `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+  const auth = (chatgpt_user_id, chatgpt_account_id) =>
+    JSON.stringify({
+      tokens: {
+        account_id: chatgpt_account_id,
+        id_token: payload({
+          sub: `google-oauth2|999`,
+          email: "u@example.com",
+          "https://api.openai.com/auth": { chatgpt_user_id, chatgpt_account_id },
+        }),
+      },
+    });
+
+  // Different users, same team account -> shared workspace.
+  writeAuth(auth("user-1", "team-X"));
+  saveAccount("t1");
+  writeAuth(auth("user-2", "team-X"));
+  saveAccount("t2");
+  assert.equal(sharedWorkspaceOf("t2"), "t1");
+
+  // Same user (across the same workspace) is a duplicate, but still has a
+  // workspace teammate (t2) that is a different user.
+  writeAuth(auth("user-1", "team-X"));
+  saveAccount("dup");
+  assert.equal(duplicateAccountOf("dup"), "t1");
+  assert.equal(sharedWorkspaceOf("dup"), "t2");
+
+  // A genuinely separate account shares nothing.
+  writeAuth(auth("user-3", "team-Y"));
+  saveAccount("other");
+  assert.equal(sharedWorkspaceOf("other"), null);
+  assert.equal(sharedWorkspaceOf("does-not-exist"), null);
 });
 
 test("normalizePlan maps backend plan strings to canonical keys", () => {

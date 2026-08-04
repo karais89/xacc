@@ -256,6 +256,28 @@ export function duplicateAccountOf(name) {
   );
 }
 
+// Returns the name of another saved account that shares `name`'s team /
+// workspace account_id but is a DIFFERENT user (a workspace teammate), or
+// null. Unlike duplicateAccountOf, these are genuinely distinct logins, so
+// this is informational ("shared workspace"), never a duplicate warning.
+export function sharedWorkspaceOf(name) {
+  const file = accountFile(name);
+  if (!fs.existsSync(file)) return null;
+  const data = readJson(file);
+  const accountId = data?.tokens?.account_id;
+  if (!accountId) return null;
+  const key = identityKey(data);
+  return (
+    listSnapshots().find((n) => {
+      if (n === name) return false;
+      const other = readJson(accountFile(n));
+      if (other?.tokens?.account_id !== accountId) return false;
+      if (key && identityKey(other) === key) return false;
+      return true;
+    }) || null
+  );
+}
+
 // Canonical plan keys and their display labels, mirroring codex-auth.
 const PLAN_LABELS = {
   free: "Free",

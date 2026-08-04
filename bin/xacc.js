@@ -9,6 +9,7 @@ import {
   listAccounts,
   removeAccount,
   saveAccount,
+  sharedWorkspaceOf,
   suggestAccountName,
   switchAccount,
 } from "../src/core.js";
@@ -99,9 +100,11 @@ try {
       const finalName = await tryLogin(name, forwarded);
       const { overwritten } = saveAccount(finalName);
       const dup = duplicateAccountOf(finalName);
+      const ws = sharedWorkspaceOf(finalName);
       console.log(
         `Logged in and saved as '${finalName}'.${overwritten ? " (overwritten)" : ""}` +
-          (dup ? ` Warning: same ChatGPT account as '${dup}'.` : "")
+          (dup ? ` Warning: already saved as '${dup}'.` : "") +
+          (ws ? ` Shares a workspace with '${ws}'.` : "")
       );
       break;
     }
