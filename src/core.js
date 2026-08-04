@@ -109,7 +109,7 @@ export function getActiveAccount() {
   return null;
 }
 
-export function saveAccount(name) {
+export function saveAccount(name, { overwrite = false } = {}) {
   validateName(name);
   const auth = authFile();
   if (!fs.existsSync(auth)) {
@@ -119,9 +119,19 @@ export function saveAccount(name) {
   }
   const target = accountFile(name);
   const overwritten = fs.existsSync(target);
+  if (overwritten && !overwrite) {
+    const same = sha256(auth) === sha256(target);
+    if (same) {
+      writeState(name);
+      return { name, overwritten: false, unchanged: true };
+    }
+    throw new Error(
+      `An account named '${name}' already exists. Choose another name or use --force to replace it.`
+    );
+  }
   writeFileAtomic(target, fs.readFileSync(auth));
   writeState(name);
-  return { name, overwritten };
+  return { name, overwritten, unchanged: false };
 }
 
 export function listAccounts() {
@@ -146,19 +156,46 @@ export function switchAccount(name) {
   const auth = authFile();
   const live = fs.existsSync(auth) ? fs.readFileSync(auth) : null;
 
-  // Auto-backup: write the live auth back into whichever saved account it
-  // belongs to, so freshly refreshed tokens are preserved before switching.
+  // Auto-backup only when the live auth can be tied to a saved profile by an
+  // exact hash or the same user + workspace identity. A recorded state name
+  // alone is not proof: an out-of-band `codex login` may have replaced the
+  // live file with another account, and backing that up would destroy the
+  // recorded profile's snapshot.
   const matched = matchLiveAuth();
-  const backupName = matched || readState();
+  let backupName = matched;
+  if (live && !backupName) {
+    const liveKey = identityKey(readJson(auth));
+    const recorded = readState();
+    const candidates = liveKey
+      ? listSnapshots().filter(
+          (candidate) => identityKey(readJson(accountFile(candidate))) === liveKey
+        )
+      : [];
+    backupName =
+      recorded && candidates.includes(recorded)
+        ? recorded
+        : candidates.length === 1
+          ? candidates[0]
+          : null;
+
+    if (!backupName) {
+      throw new Error(
+        "Live Codex auth does not match a saved account. Save it under a new name before switching."
+      );
+    }
+  }
+
+  let backedUp = false;
   if (live && backupName && fs.existsSync(accountFile(backupName))) {
     if (sha256(auth) !== sha256(accountFile(backupName))) {
       writeFileAtomic(accountFile(backupName), live);
+      backedUp = true;
     }
   }
 
   writeFileAtomic(auth, fs.readFileSync(target));
   writeState(name);
-  return { name, backedUp: !!backupName };
+  return { name, backedUp };
 }
 
 export function removeAccount(name) {
@@ -214,7 +251,13 @@ export function suggestAccountName() {
   const auth = authFile();
   if (!fs.existsSync(auth)) return null;
   const local = emailFromAuth(readJson(auth))?.split("@")[0];
-  return local && NAME_PATTERN.test(local) ? local : null;
+  if (!local || !NAME_PATTERN.test(local)) return null;
+  if (!fs.existsSync(accountFile(local))) return local;
+  for (let suffix = 2; suffix < 10_000; suffix++) {
+    const candidate = `${local}-${suffix}`;
+    if (!fs.existsSync(accountFile(candidate))) return candidate;
+  }
+  return null;
 }
 
 // Returns the email tied to a saved account's snapshot, or null.
@@ -224,12 +267,9 @@ export function accountEmail(name) {
   return emailFromAuth(readJson(file));
 }
 
-// Canonical per-user identity key for a saved account's snapshot. Prefers the
-// individual ChatGPT user id from the id_token, then the SSO subject, then the
-// email. It deliberately does NOT use tokens.account_id: that value is the team
-// / workspace account id, shared by every member of a team, so two genuinely
-// different users in the same team account would otherwise look like one.
-function identityKey(data) {
+// Canonical per-user key. This intentionally excludes workspace identity so it
+// can also tell whether two different users share a workspace.
+function userIdentityKey(data) {
   const claims = claimsFromAuth(data);
   const auth = claims["https://api.openai.com/auth"] || {};
   const userId = auth.chatgpt_user_id || auth.user_id;
@@ -238,6 +278,22 @@ function identityKey(data) {
   const email = emailFromAuth(data);
   if (email) return `email:${email}`;
   return null;
+}
+
+function workspaceIdentity(data) {
+  const claims = claimsFromAuth(data);
+  const auth = claims["https://api.openai.com/auth"] || {};
+  return data?.tokens?.account_id || auth.chatgpt_account_id || null;
+}
+
+// A Codex profile is the combination of a ChatGPT user and workspace. The
+// workspace component prevents the same user in two workspaces from being
+// incorrectly flagged as a duplicate, while the user component keeps team
+// members in one workspace distinct.
+function identityKey(data) {
+  const user = userIdentityKey(data);
+  if (!user) return null;
+  return `${user}|workspace:${workspaceIdentity(data) || "none"}`;
 }
 
 // Returns the name of another saved account that is the same identity as
@@ -264,15 +320,15 @@ export function sharedWorkspaceOf(name) {
   const file = accountFile(name);
   if (!fs.existsSync(file)) return null;
   const data = readJson(file);
-  const accountId = data?.tokens?.account_id;
+  const accountId = workspaceIdentity(data);
   if (!accountId) return null;
-  const key = identityKey(data);
+  const userKey = userIdentityKey(data);
   return (
     listSnapshots().find((n) => {
       if (n === name) return false;
       const other = readJson(accountFile(n));
-      if (other?.tokens?.account_id !== accountId) return false;
-      if (key && identityKey(other) === key) return false;
+      if (workspaceIdentity(other) !== accountId) return false;
+      if (userKey && userIdentityKey(other) === userKey) return false;
       return true;
     }) || null
   );
@@ -376,57 +432,3 @@ export function writeAuth(bytes) {
 }
 
 export { authFile };
-
-// ── OAuth token refresh ────────────────────────────────────────────────────
-// The public client id Codex CLI uses for ChatGPT OAuth. Refresh tokens are
-// short-lived (minutes/hours) and require refreshing before they can drive the
-// chatgpt.com usage endpoint.
-const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-
-// Refreshes a saved account's access token using its stored refresh_token and
-// persists the refreshed bundle back to the snapshot, keeping the live auth
-// file in sync when this is the active account so it does not turn stale.
-// Resolves with { refreshed, accessToken }.
-export async function refreshSavedAccountTokens(name) {
-  validateName(name);
-  const file = accountFile(name);
-  if (!fs.existsSync(file)) return { refreshed: false };
-  const data = readJson(file);
-  const refresh = data?.tokens?.refresh_token;
-  if (typeof refresh !== "string" || !refresh) return { refreshed: false };
-  const wasActiveMatch = matchLiveAuth() === name;
-
-  let response;
-  try {
-    response = await fetch(OAUTH_TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: CODEX_CLIENT_ID,
-        grant_type: "refresh_token",
-        refresh_token: refresh,
-      }),
-    });
-  } catch {
-    return { refreshed: false };
-  }
-  if (!response.ok) return { refreshed: false };
-  let json;
-  try {
-    json = await response.json();
-  } catch {
-    return { refreshed: false };
-  }
-  if (typeof json?.access_token !== "string") return { refreshed: false };
-
-  if (typeof json.refresh_token === "string") data.tokens.refresh_token = json.refresh_token;
-  data.tokens.access_token = json.access_token;
-  if (typeof json.id_token === "string") data.tokens.id_token = json.id_token;
-  data.last_refresh = new Date().toISOString();
-
-  const bytes = Buffer.from(JSON.stringify(data, null, 2) + "\n");
-  writeFileAtomic(file, bytes);
-  if (wasActiveMatch) writeFileAtomic(authFile(), bytes);
-  return { refreshed: true, accessToken: json.access_token };
-}

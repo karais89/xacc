@@ -1,4 +1,4 @@
-import { normalizePlan, refreshSavedAccountTokens } from "./core.js";
+import { normalizePlan } from "./core.js";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -26,11 +26,9 @@ export function parseUsage(json) {
 }
 
 // Fetches the live usage snapshot for a single account. `meta` must be an
-// accountMeta() result carrying accountId + accessToken. When the backend
-// rejects the token with 401 and `refreshName` is given, the token is
-// refreshed via the stored refresh_token and the request is retried once.
-// `signal` (optional) lets the caller abort the request early.
-export function fetchUsage(meta, { timeoutMs = 8000, refreshName, signal } = {}) {
+// accountMeta() result carrying accountId + accessToken. This read-only lookup
+// never refreshes or writes credentials. `signal` lets the caller abort early.
+export function fetchUsage(meta, { timeoutMs = 8000, signal } = {}) {
   const { accountId } = meta || {};
   if (!accountId || !meta?.accessToken) {
     return Promise.reject(new Error("account has no ChatGPT auth tokens"));
@@ -52,13 +50,7 @@ export function fetchUsage(meta, { timeoutMs = 8000, refreshName, signal } = {})
     });
   return (async () => {
     try {
-      let res = await request(meta.accessToken, controller.signal);
-      if (res.status === 401 && refreshName) {
-        const { refreshed, accessToken } = await refreshSavedAccountTokens(refreshName);
-        if (refreshed && accessToken) {
-          res = await request(accessToken, controller.signal);
-        }
-      }
+      const res = await request(meta.accessToken, controller.signal);
       if (!res.ok) throw new Error(`usage request failed (HTTP ${res.status})`);
       const usage = parseUsage(await res.json());
       if (!usage) throw new Error("unexpected usage response");
@@ -71,16 +63,11 @@ export function fetchUsage(meta, { timeoutMs = 8000, refreshName, signal } = {})
 }
 
 // Fetches usage for many accounts concurrently. Always resolves: each account
-// maps to either a parsed usage snapshot or `{ error: message }`. Accounts with
-// an expired token are auto-refreshed via their refresh_token.
+// maps to either a parsed usage snapshot or `{ error: message }`. It never
+// refreshes or writes account credentials.
 export async function fetchAllUsages(accounts, options = {}) {
   const settled = await Promise.allSettled(
-    accounts.map((a) =>
-      fetchUsage(a._auth, {
-        ...options,
-        refreshName: typeof a.name === "string" ? a.name : undefined,
-      })
-    )
+    accounts.map((a) => fetchUsage(a._auth, options))
   );
   return Object.fromEntries(
     accounts.map((a, i) => [

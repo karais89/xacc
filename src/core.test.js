@@ -69,25 +69,56 @@ test("switch swaps auth and records current", (t) => {
 test("switch auto-backs up refreshed live auth into the matching account", (t) => {
   setup(t);
 
+  const auth = (user, workspace, accessToken) => {
+    const payload = Buffer.from(
+      JSON.stringify({
+        email: `${user}@example.com`,
+        "https://api.openai.com/auth": {
+          chatgpt_user_id: user,
+          chatgpt_account_id: workspace,
+        },
+      })
+    ).toString("base64url");
+    return JSON.stringify({
+      tokens: { id_token: `h.${payload}.s`, account_id: workspace, access_token: accessToken },
+    });
+  };
+
   // Log into account A and save it.
-  writeAuth("TOKEN-A");
+  writeAuth(auth("user-a", "workspace-a", "token-a"));
   saveAccount("personal");
 
   // Log into account B and save it, then return to A.
-  writeAuth("TOKEN-B");
+  writeAuth(auth("user-b", "workspace-b", "token-b"));
   saveAccount("work");
   switchAccount("personal");
 
   // Account A's access token is refreshed by Codex while live; the live file
   // no longer matches the personal snapshot, but the recorded state still
   // points at personal.
-  writeAuth("TOKEN-A-REFRESHED");
+  const refreshed = auth("user-a", "workspace-a", "token-a-refreshed");
+  writeAuth(refreshed);
 
   // Switching away must write the refreshed token back into 'personal'.
   switchAccount("work");
   const personalPath = path.join(process.env.CODEX_ACC_HOME, "accounts", "personal.auth.json");
-  assert.equal(fs.readFileSync(personalPath, "utf-8"), "TOKEN-A-REFRESHED");
-  assert.equal(fs.readFileSync(authFile(), "utf-8"), "TOKEN-B");
+  assert.equal(fs.readFileSync(personalPath, "utf-8"), refreshed);
+  assert.equal(fs.readFileSync(authFile(), "utf-8"), auth("user-b", "workspace-b", "token-b"));
+});
+
+test("switch refuses to overwrite a saved profile with an unknown live login", (t) => {
+  const { accHome } = setup(t);
+  writeAuth("TOKEN-A");
+  saveAccount("personal");
+  writeAuth("TOKEN-B");
+  saveAccount("work");
+  switchAccount("personal");
+
+  writeAuth("OUT-OF-BAND-LOGIN");
+  const personalPath = path.join(accHome, "accounts", "personal.auth.json");
+  assert.throws(() => switchAccount("work"), /does not match a saved account/);
+  assert.equal(fs.readFileSync(personalPath, "utf-8"), "TOKEN-A");
+  assert.equal(fs.readFileSync(authFile(), "utf-8"), "OUT-OF-BAND-LOGIN");
 });
 
 test("switch to unknown account fails", (t) => {
@@ -118,6 +149,21 @@ test("save without auth file fails", (t) => {
   assert.throws(() => saveAccount("personal"), /codex login/);
 });
 
+test("save protects existing names unless force is explicit", (t) => {
+  const { accHome } = setup(t);
+  writeAuth("TOKEN-A");
+  saveAccount("personal");
+  const personalPath = path.join(accHome, "accounts", "personal.auth.json");
+
+  writeAuth("TOKEN-B");
+  assert.throws(() => saveAccount("personal"), /already exists.*--force/);
+  assert.equal(fs.readFileSync(personalPath, "utf-8"), "TOKEN-A");
+
+  const result = saveAccount("personal", { overwrite: true });
+  assert.equal(result.overwritten, true);
+  assert.equal(fs.readFileSync(personalPath, "utf-8"), "TOKEN-B");
+});
+
 test("rename renames snapshot and updates state", (t) => {
   setup(t);
   writeAuth("TOKEN-A");
@@ -145,6 +191,9 @@ test("suggestAccountName derives name from id_token email", (t) => {
   ).toString("base64url");
   writeAuth(JSON.stringify({ tokens: { id_token: `h.${payload}.s` } }));
   assert.equal(suggestAccountName(), "john.doe");
+
+  saveAccount("john.doe");
+  assert.equal(suggestAccountName(), "john.doe-2");
 
   // Invalid payload must not throw.
   writeAuth(JSON.stringify({ tokens: { id_token: "not-a-jwt" } }));
@@ -227,6 +276,11 @@ test("duplicateAccountOf distinguishes users by id_token identity, not account_i
   writeAuth(auth("user-2", "team-X"));
   saveAccount("other");
   assert.equal(duplicateAccountOf("other"), null);
+
+  // The same user in another workspace is a separate Codex profile.
+  writeAuth(auth("user-1", "team-Y"));
+  saveAccount("other-workspace");
+  assert.equal(duplicateAccountOf("other-workspace"), null);
 
   // No id_token -> cannot determine identity, so never flagged.
   writeAuth("TOKEN-A");

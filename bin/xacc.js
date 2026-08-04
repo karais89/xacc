@@ -26,11 +26,11 @@ function printUsage() {
   console.log(`xacc - switch saved Codex CLI accounts
 
 Usage:
-  xacc login [name] [--device-auth]  Run 'codex login', then save the account
+  xacc login [name] [flags]          Run 'codex login', then save the account
   xacc switch [name]                 Switch account (picker without a name)
   xacc list [--active]               List saved accounts
   xacc current                       Show the active account
-  xacc save <name>                   Save the current auth.json as a named account
+  xacc save <name> [--force]         Save the current auth.json as a named account
   xacc remove <name>                 Delete a saved account
   xacc tui                           Interactive account manager
   xacc --version                     Show the installed version
@@ -40,6 +40,8 @@ Notes:
   - 'login' runs the real 'codex login' flow (plus any extra args you pass,
     e.g. --device-auth for headless), then saves it. The account name is
     suggested from your login email; pass a name to set it directly.
+  - Existing names are protected. Pass --force to 'login' or 'save' only when
+    you intentionally want to replace that snapshot.
   - 'save' is a legacy alias that stores the current auth.json without logging in.
   - Restart Codex after switching if it is already running.
   - Storage: ${authFile()}`);
@@ -50,13 +52,14 @@ function die(message) {
   process.exit(1);
 }
 
-// Returns { name, forwarded }: first non-flag arg is the account name (must be
-// unique), every flag arg is forwarded to the real 'codex login' command.
+// Returns the optional profile name, xacc's overwrite choice, and flags to
+// forward to the real `codex login` command.
 function parseLoginArgs(args) {
   const nameArgs = args.filter((a) => !a.startsWith("-"));
-  const forwarded = args.filter((a) => a.startsWith("-"));
+  const overwrite = args.includes("--force");
+  const forwarded = args.filter((a) => a.startsWith("-") && a !== "--force");
   if (nameArgs.length > 1) die("Usage: xacc login [<name>] [codex login flags...]");
-  return { name: nameArgs[0], forwarded };
+  return { name: nameArgs[0], forwarded, overwrite };
 }
 
 async function tryLogin(resolved, forwarded) {
@@ -96,23 +99,31 @@ try {
       break;
     }
     case "login": {
-      const { name, forwarded } = parseLoginArgs(args);
+      const { name, forwarded, overwrite } = parseLoginArgs(args);
       const finalName = await tryLogin(name, forwarded);
-      const { overwritten } = saveAccount(finalName);
+      const { overwritten, unchanged } = saveAccount(finalName, { overwrite });
       const dup = duplicateAccountOf(finalName);
       const ws = sharedWorkspaceOf(finalName);
       console.log(
-        `Logged in and saved as '${finalName}'.${overwritten ? " (overwritten)" : ""}` +
+        `Logged in and ${unchanged ? "already saved" : "saved"} as '${finalName}'.${overwritten ? " (replaced)" : ""}` +
           (dup ? ` Warning: already saved as '${dup}'.` : "") +
           (ws ? ` Shares a workspace with '${ws}'.` : "")
       );
       break;
     }
     case "save": {
-      const name = args[0];
-      if (!name) die("Usage: xacc save <name>");
-      const { overwritten } = saveAccount(name);
-      console.log(`Saved current auth as '${name}'.${overwritten ? " (overwritten)" : ""}`);
+      const positional = args.filter((arg) => !arg.startsWith("-"));
+      const unknownFlags = args.filter((arg) => arg.startsWith("-") && arg !== "--force");
+      const name = positional[0];
+      if (!name || positional.length > 1 || unknownFlags.length) {
+        die("Usage: xacc save <name> [--force]");
+      }
+      const { overwritten, unchanged } = saveAccount(name, { overwrite: args.includes("--force") });
+      console.log(
+        unchanged
+          ? `Account '${name}' already contains the current auth.`
+          : `Saved current auth as '${name}'.${overwritten ? " (replaced)" : ""}`
+      );
       break;
     }
     case "switch": {

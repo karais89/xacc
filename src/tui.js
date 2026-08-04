@@ -17,7 +17,7 @@ import {
   writeAuth,
 } from "./core.js";
 import { runCodexLogin } from "./login.js";
-import { fetchAllUsages } from "./usage.js";
+import { fetchUsage } from "./usage.js";
 
 const require = createRequire(import.meta.url);
 const version = require("../package.json").version;
@@ -214,18 +214,18 @@ function renderFooter(mode, ctx, hint = "") {
   if (mode === "search") {
     return [
       line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("Esc")} close`),
-      line(`${D("type")} filter${sep}${D(G.back)} erase`),
+      line(`${D("type")} filter${sep}${D(G.back)} erase${sep}${D("u")} usage`),
     ];
   }
   if (hint) {
     return [
       line(hint),
-      line(`${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
+      line(`${D("u")} usage${sep}${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
     ];
   }
   return [
     line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("/")} search`),
-    line(`${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
+    line(`${D("u")} usage${sep}${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
   ];
 }
 
@@ -516,11 +516,11 @@ export async function selectAccountInteractive() {
         lastActivity: meta.lastActivity,
         _auth: meta, // internal; never rendered
         usage: null,
+        usageUpdatedAt: null,
       };
     });
   let full = load();
-  let usageLoading = false;
-  let usageUpdatedAt = null;
+  let usageLoadingName = null;
   let query = "";
   let mode = "nav";
   let hint = "";
@@ -588,13 +588,15 @@ export async function selectAccountInteractive() {
     // erasing any lines that are no longer part of the frame.
     if (prevHeight) process.stdout.write(MOVE_UP.repeat(prevHeight));
     process.stdout.write(GOTO_COL);
-    const frame = buildTemplate(visible(), index, {
+    const renderedAccounts = visible();
+    const selected = selectedAccount(renderedAccounts, index);
+    const frame = buildTemplate(renderedAccounts, index, {
       query,
       mode,
       hint,
       version,
-      usageLoading,
-      usageUpdatedAt,
+      usageLoading: selected?.name === usageLoadingName,
+      usageUpdatedAt: selected?.usageUpdatedAt || null,
       input,
       addStep,
       addMethod,
@@ -618,25 +620,42 @@ export async function selectAccountInteractive() {
 
   let usageAbort = new AbortController();
 
-  // Fetches live usage for every account that has tokens. Runs in the
-  // background and re-renders as results come in. Does nothing once the
-  // picker has finished, so it can never redraw over the exit message.
+  // Usage is an explicit, selected-account action. Opening the TUI, moving the
+  // selection, saving, and switching remain local-only operations.
   const refreshUsage = async () => {
     if (finished) return;
-    const targets = full.filter((a) => a._auth && a._auth.accountId && a._auth.accessToken);
-    if (!targets.length) return;
-    usageAbort = new AbortController();
-    usageLoading = true;
-    usageUpdatedAt = null;
-    render();
-    const map = await fetchAllUsages(targets, { signal: usageAbort.signal });
-    if (finished) return;
-    usageLoading = false;
-    for (const a of full) {
-      if (map[a.name]) a.usage = map[a.name];
+    const target = list[index];
+    if (!target?._auth?.accountId || !target?._auth?.accessToken) {
+      hint = "Usage is unavailable for this account.";
+      render();
+      return;
     }
-    usageUpdatedAt = Date.now();
+    usageAbort.abort();
+    const controller = new AbortController();
+    usageAbort = controller;
+    usageLoadingName = target.name;
+    target.usage = null;
+    target.usageUpdatedAt = null;
+    hint = "";
     render();
+    try {
+      const usage = await fetchUsage(target._auth, { signal: controller.signal });
+      if (finished || usageAbort !== controller) return;
+      const current = full.find((account) => account.name === target.name);
+      if (current) {
+        current.usage = usage;
+        current.usageUpdatedAt = Date.now();
+      }
+    } catch (error) {
+      if (finished || usageAbort !== controller) return;
+      const current = full.find((account) => account.name === target.name);
+      if (current) current.usage = { error: error?.message || "usage unavailable" };
+    } finally {
+      if (!finished && usageAbort === controller) {
+        usageLoadingName = null;
+        render();
+      }
+    }
   };
 
   const refreshList = () => {
@@ -699,7 +718,7 @@ export async function selectAccountInteractive() {
   const saveNewAccount = () => {
     const name = (input.trim() || suggested || "default").trim();
     try {
-      const { overwritten } = saveAccount(name);
+      saveAccount(name);
       full = load();
       const dup = duplicateAccountOf(name);
       const ws = sharedWorkspaceOf(name);
@@ -708,11 +727,10 @@ export async function selectAccountInteractive() {
       mode = "nav";
       refreshList();
       backToPicker(
-        `${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}` +
+        `${T.ok}${G.check}${RESET} Saved '${name}'.` +
           (dup ? ` ${T.warn}${G.dotStale}${RESET} Already saved as '${dup}'.` : "") +
           (ws ? ` ${T.warn}${G.dotStale}${RESET} Shared workspace with '${ws}'.` : "")
       );
-      refreshUsage();
     } catch (error) {
       hint = error.message;
       render();
@@ -787,8 +805,8 @@ export async function selectAccountInteractive() {
       try {
         switchAccount(name);
         // Stay in the picker so the user can switch again in the same session.
-        // Reload the list to repaint the new active account, then fetch its
-        // usage; the confirmation is shown as a toast on the frame.
+        // Reload the list to repaint the new active account. Usage remains an
+        // explicit `u` action and is never fetched merely because of a switch.
         full = load();
         if (!query.trim()) {
           const newActive = full.findIndex((a) => a.active);
@@ -796,7 +814,6 @@ export async function selectAccountInteractive() {
         }
         refreshList();
         backToPicker(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
-        refreshUsage();
       } catch (error) {
         hint = error.message;
         render();
@@ -884,6 +901,8 @@ export async function selectAccountInteractive() {
         } else if (key.name === "return" || key.name === "enter") {
           const current = list[index];
           if (current) doSwitch(current.name);
+        } else if (key.name === "u") {
+          refreshUsage();
         } else if (key.name === "backspace") {
           query = query.slice(0, -1);
           refreshList();
@@ -947,6 +966,9 @@ export async function selectAccountInteractive() {
           }
           break;
         }
+        case "u":
+          refreshUsage();
+          break;
         case "q":
         case "escape":
           finish(null);
@@ -961,6 +983,5 @@ export async function selectAccountInteractive() {
     process.stdin.on("keypress", onKeypress);
     process.stdin.on("end", onEnd);
     renderClean();
-    refreshUsage();
   });
 }
