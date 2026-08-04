@@ -569,10 +569,19 @@ export async function selectAccountInteractive() {
       process.stdin.pause();
       process.stdin.removeListener("keypress", onKeypress);
       process.stdin.removeListener("end", onEnd);
+      try {
+        process.stdin.destroy();
+      } catch {}
     };
     const finish = (name) => {
       cleanup();
       resolvePicker(name);
+      // A raw-mode TTY stdin keeps the event loop alive even after pause(),
+      // so on some platforms (notably Windows) the process would hang after
+      // the switch instead of exiting. Force it out once the top-level await
+      // in bin/xacc.js has settled (microtasks run before setImmediate) and
+      // stdout has flushed.
+      setImmediate(() => process.exit(process.exitCode || 0));
     };
 
     onKeypress = (str, key) => {
