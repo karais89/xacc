@@ -7,9 +7,12 @@ import path from "node:path";
 import {
   authFile,
   getActiveAccount,
+  isLoggedIn,
   listAccounts,
   removeAccount,
+  renameAccount,
   saveAccount,
+  suggestAccountName,
   switchAccount,
 } from "./core.js";
 
@@ -107,4 +110,44 @@ test("remove deletes snapshot and state", (t) => {
 test("save without auth file fails", (t) => {
   setup(t);
   assert.throws(() => saveAccount("personal"), /codex login/);
+});
+
+test("rename renames snapshot and updates state", (t) => {
+  setup(t);
+  writeAuth("TOKEN-A");
+  saveAccount("personal");
+
+  renameAccount("personal", "private");
+  const { accounts } = listAccounts();
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0].name, "private");
+  assert.equal(getActiveAccount().name, "private");
+
+  assert.throws(() => renameAccount("private", "private"), /already exists/);
+  assert.throws(() => renameAccount("nope", "x"), /Unknown account/);
+  assert.throws(() => renameAccount("private", "bad name"), /Invalid account name/);
+});
+
+test("suggestAccountName derives name from id_token email", (t) => {
+  setup(t);
+  writeAuth("TOKEN-A");
+  assert.equal(suggestAccountName(), null);
+
+  // A minimal, well-formed id_token payload with an email claim.
+  const payload = Buffer.from(
+    JSON.stringify({ email: "john.doe@example.com" })
+  ).toString("base64url");
+  writeAuth(JSON.stringify({ tokens: { id_token: `h.${payload}.s` } }));
+  assert.equal(suggestAccountName(), "john.doe");
+
+  // Invalid payload must not throw.
+  writeAuth(JSON.stringify({ tokens: { id_token: "not-a-jwt" } }));
+  assert.equal(suggestAccountName(), null);
+});
+
+test("isLoggedIn reflects auth.json presence", (t) => {
+  setup(t);
+  assert.equal(isLoggedIn(), false);
+  writeAuth("TOKEN-A");
+  assert.equal(isLoggedIn(), true);
 });

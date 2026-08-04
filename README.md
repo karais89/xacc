@@ -43,20 +43,31 @@ xacc current
 Restart Codex after switching if it is already running (Codex reads `auth.json`
 only at startup).
 
-## Interactive picker
+## Interactive management TUI
 
 ```bash
 xacc tui
 ```
 
-Opens a terminal picker: arrow keys to move, `Enter` to switch, `q`/`Esc` to
-quit. Useful when you want to confirm which account is which before switching.
+A terminal UI to pick and manage accounts:
+
+| Key | Action |
+| --- | --- |
+| `^` / `v` | Move selection |
+| `Enter` | Switch to the selected account |
+| `a` | Add an account (runs `codex login`, suggests a name from the logged-in email) |
+| `r` | Rename the selected account |
+| `d` | Delete the selected account (asks for confirmation) |
+| `q` / `Esc` / `Ctrl-C` | Quit |
+
+If you are logged in but have no saved accounts, the TUI lets you save the
+current login as your first profile instead of bailing out.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `xacc tui` | Interactive account picker |
+| `xacc tui` | Interactive management UI (pick / add / rename / delete) |
 | `xacc save <name>` | Save the current `auth.json` as a named account |
 | `xacc switch <name>` | Switch to a saved account (auto-backs up current) |
 | `xacc list` | List saved accounts; `*` active, `~` recorded but live auth differs |

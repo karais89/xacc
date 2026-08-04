@@ -175,6 +175,46 @@ export function removeAccount(name) {
   return { name };
 }
 
+export function renameAccount(oldName, newName) {
+  validateName(oldName);
+  validateName(newName);
+  const src = accountFile(oldName);
+  if (!fs.existsSync(src)) {
+    throw new Error(`Unknown account '${oldName}'. Nothing to rename.`);
+  }
+  const dst = accountFile(newName);
+  if (fs.existsSync(dst)) {
+    throw new Error(`An account named '${newName}' already exists.`);
+  }
+  writeFileAtomic(dst, fs.readFileSync(src));
+  fs.unlinkSync(src);
+  const state = readState();
+  if (state === oldName) {
+    writeState(newName);
+  }
+  return { name: newName };
+}
+
+// Derives a sensible default account name from the logged-in id_token's email
+// (e.g. "john.doe@example.com" -> "john.doe"), or null when unavailable.
+export function suggestAccountName() {
+  const auth = authFile();
+  if (!fs.existsSync(auth)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(auth, "utf-8"));
+    const idToken = data?.tokens?.id_token;
+    if (typeof idToken !== "string" || !idToken.includes(".")) return null;
+    const payload = Buffer.from(idToken.split(".")[1], "base64url").toString("utf-8");
+    const claims = JSON.parse(payload);
+    const email = typeof claims.email === "string" ? claims.email : null;
+    if (!email) return null;
+    const local = email.split("@")[0];
+    return NAME_PATTERN.test(local) ? local : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isLoggedIn() {
   return fs.existsSync(authFile());
 }
