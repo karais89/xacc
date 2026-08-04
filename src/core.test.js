@@ -6,10 +6,13 @@ import path from "node:path";
 
 import {
   accountEmail,
+  accountMeta,
   authFile,
   getActiveAccount,
   isLoggedIn,
   listAccounts,
+  normalizePlan,
+  planLabel,
   removeAccount,
   renameAccount,
   saveAccount,
@@ -168,4 +171,42 @@ test("accountEmail returns the email embedded in a saved account", (t) => {
   writeAuth("TOKEN-A");
   saveAccount("personal");
   assert.equal(accountEmail("personal"), null);
+});
+
+test("accountMeta exposes email, plan, tokens, and last activity", (t) => {
+  setup(t);
+  const payload = Buffer.from(
+    JSON.stringify({
+      email: "plus@example.com",
+      "https://api.openai.com/auth": { chatgpt_plan_type: "ChatGPTPlus" },
+    })
+  ).toString("base64url");
+  writeAuth(
+    JSON.stringify({
+      tokens: { id_token: `h.${payload}.s`, account_id: "acc-123", access_token: "tok-abc" },
+    })
+  );
+  saveAccount("work");
+
+  const meta = accountMeta("work");
+  assert.equal(meta.email, "plus@example.com");
+  assert.equal(meta.plan, "plus");
+  assert.equal(meta.accountId, "acc-123");
+  assert.equal(meta.accessToken, "tok-abc");
+  assert.ok(meta.lastActivity > 0);
+  assert.equal(accountMeta("missing"), null);
+});
+
+test("normalizePlan maps backend plan strings to canonical keys", () => {
+  assert.equal(normalizePlan("free"), "free");
+  assert.equal(normalizePlan("plus"), "plus");
+  assert.equal(normalizePlan("pro"), "pro");
+  assert.equal(normalizePlan("self_serve_business_usage_based"), "business");
+  assert.equal(normalizePlan("enterprise_cbp_usage_based"), "enterprise");
+  assert.equal(normalizePlan("education"), "edu");
+  assert.equal(normalizePlan("nope"), null);
+  assert.equal(normalizePlan(42), null);
+  assert.equal(planLabel("plus"), "Plus");
+  assert.equal(planLabel("enterprise"), "Enterprise");
+  assert.equal(planLabel("nope"), null);
 });

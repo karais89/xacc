@@ -224,6 +224,72 @@ export function accountEmail(name) {
   return emailFromAuth(readJson(file));
 }
 
+// Canonical plan keys and their display labels, mirroring codex-auth.
+const PLAN_LABELS = {
+  free: "Free",
+  go: "Go",
+  plus: "Plus",
+  prolite: "Pro Lite",
+  pro: "Pro",
+  business: "Business",
+  enterprise: "Enterprise",
+  edu: "Edu",
+};
+
+// Normalizes the raw plan_type strings sent by OpenAI's backend (e.g.
+// "chatgptplus", "self_serve_business_usage_based") into the canonical keys
+// above, or null when unrecognized.
+export function normalizePlan(s) {
+  if (typeof s !== "string") return null;
+  const lower = s.toLowerCase().replace(/^chatgpt/, "");
+  if (lower === "team" || lower === "self_serve_business_usage_based") return "business";
+  if (lower === "enterprise_cbp_usage_based" || lower === "hc") return "enterprise";
+  if (lower === "education") return "edu";
+  return PLAN_LABELS[lower] ? lower : null;
+}
+
+export function planLabel(plan) {
+  return PLAN_LABELS[plan] || null;
+}
+
+// Decodes the login id_token's claims (email + plan) plus the live auth
+// tokens needed for backend usage lookups. The tokens are returned so they
+// can be sent over an HTTPS request, never printed.
+function claimsFromAuth(data) {
+  const idToken = data?.tokens?.id_token;
+  if (typeof idToken !== "string" || !idToken.includes(".")) return {};
+  try {
+    const payload = Buffer.from(idToken.split(".")[1], "base64url").toString("utf-8");
+    return JSON.parse(payload) || {};
+  } catch {
+    return {};
+  }
+}
+
+// Enriches a saved account with local metadata: email, id_token plan, the
+// timestamp of its last activity (snapshot write time), and the auth payload
+// (account id + access token) required for live usage lookups.
+export function accountMeta(name) {
+  const file = accountFile(name);
+  if (!fs.existsSync(file)) return null;
+  const data = readJson(file);
+  const claims = claimsFromAuth(data);
+  const authClaim = claims["https://api.openai.com/auth"] || {};
+  let lastActivity = null;
+  try {
+    lastActivity = fs.statSync(file).mtimeMs;
+  } catch {
+    // snapshot may have been removed concurrently; leave lastActivity null.
+  }
+  return {
+    email: emailFromAuth(data),
+    plan: normalizePlan(authClaim.chatgpt_plan_type),
+    accountId: data?.tokens?.account_id || null,
+    accessToken: data?.tokens?.access_token || null,
+    lastActivity,
+  };
+}
+
 export function isLoggedIn() {
   return fs.existsSync(authFile());
 }

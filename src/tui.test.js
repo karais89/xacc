@@ -58,3 +58,32 @@ test("buildTemplate shows the account email inline", () => {
   assert.match(text, /work@example\.com/);
   assert.match(text, /active/);
 });
+
+test("buildTemplate detail panel shows plan, usage bars, and activity", () => {
+  const withUsage = [
+    {
+      name: "work",
+      active: true,
+      matched: true,
+      plan: "pro",
+      lastActivity: Date.now() - 2 * 3600 * 1000,
+      usage: {
+        plan: "pro",
+        primary: { usedPercent: 94, windowSeconds: 604800 },
+        secondary: null,
+        credits: null,
+      },
+    },
+  ];
+  const text = strip(buildTemplate(withUsage, 0, { version: "0.1.3", usageLoading: false }).join("\n"));
+  assert.match(text, /Pro/); // plan
+  assert.match(text, /1w/); // window label for a weekly quota
+  assert.match(text, /94%/); // usage percent
+  assert.match(text, /2 hours ago/); // relative activity
+});
+
+test("buildTemplate shows a fetching indicator while usage loads", () => {
+  const withUsage = [{ name: "work", active: true, matched: true, plan: "free", usage: null }];
+  const text = strip(buildTemplate(withUsage, 0, { version: "0.1.3", usageLoading: true }).join("\n"));
+  assert.match(text, /fetching usage/);
+});

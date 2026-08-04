@@ -2,9 +2,10 @@ import readline from "node:readline";
 import { createRequire } from "node:module";
 
 import {
-  accountEmail,
+  accountMeta,
   isLoggedIn,
   listAccounts,
+  planLabel,
   removeAccount,
   renameAccount,
   saveAccount,
@@ -12,6 +13,7 @@ import {
   switchAccount,
 } from "./core.js";
 import { runCodexLogin } from "./login.js";
+import { fetchAllUsages } from "./usage.js";
 
 const require = createRequire(import.meta.url);
 const version = require("../package.json").version;
@@ -39,6 +41,7 @@ function buildTheme() {
     faint: c("\x1b[38;5;238m"), // frame borders, rails, separators
     ok: c("\x1b[38;5;79m"), // active status, success
     warn: c("\x1b[38;5;215m"), // stale status
+    bad: c("\x1b[38;5;203m"), // near-limit usage
   };
 }
 const T = buildTheme();
@@ -63,12 +66,14 @@ function pickGlyphs() {
       tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│",
       cursor: "▸", dotActive: "●", dotStale: "◐", dotIdle: "•",
       up: "↑", down: "↓", enter: "↵", back: "←", sep: "·", check: "✓",
+      barFull: "▓", barEmpty: "░", ellipsis: "…",
     };
   }
   return {
     tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|",
     cursor: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
     up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-", check: "ok",
+    barFull: "#", barEmpty: ".", ellipsis: "...",
   };
 }
 
@@ -85,9 +90,9 @@ function selectedAccount(accounts, index) {
 }
 
 // Pure renderer: returns the array of lines making up a single frame.
-// opts: { query, mode: "nav"|"search", hint, version }
+// opts: { query, mode: "nav"|"search", hint, version, usageLoading }
 export function buildTemplate(accounts, index, opts = {}) {
-  const { query = "", mode = "nav", hint = "", version = "" } = opts;
+  const { query = "", mode = "nav", hint = "", version = "", usageLoading = false } = opts;
   const width = Math.max(24, (process.stdout.columns || 80) - 2);
   const inner = width - 2; // minus rail columns
   const text = (s) => clip(s, inner - 1);
@@ -134,13 +139,18 @@ export function buildTemplate(accounts, index, opts = {}) {
   if (mode === "search") {
     const label = `${T.accent}${UNDERLINE}search${RESET}  ${query}${T.faint}|${RESET}`;
     lines.push(`${rail} ${text(label)}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
+  } else if (selected) {
+    const detail = buildDetail(selected, usageLoading);
+    if (detail) {
+      for (const line of detail) {
+        lines.push(`${rail} ${text(line)}${spaceN(inner - 1 - displayWidth(line))}${rail}`);
+      }
+    } else {
+      lines.push(`${rail} ${" ".repeat(inner - 1)}${rail}`);
+    }
   } else {
-    const info = selected
-      ? `${statusOf(selected)} ${DIM}${G.sep} ${selected.name}${RESET}` +
-        (selected.email ? ` ${DIM}${G.sep} ${selected.email}${RESET}` : "") +
-        ` ${DIM}${G.sep} ${G.enter} to switch${RESET}`
-      : `${DIM}No accounts yet${RESET}`;
-    lines.push(`${rail} ${text(info)}${spaceN(inner - 1 - displayWidth(info))}${rail}`);
+    const label = `${DIM}No accounts yet${RESET}`;
+    lines.push(`${rail} ${label}${spaceN(inner - 1 - displayWidth(label))}${rail}`);
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
@@ -195,6 +205,82 @@ function statusOf(acc) {
     : `${T.warn}${G.dotStale} current${RESET} ${DIM}(live auth differs)${RESET}`;
 }
 
+// A 10-cell usage bar. The fill color follows the limit: healthy, high, then
+// near-limit. `NO_COLOR` (via T) keeps the cells readable, dropping the % tint.
+function bar(percent) {
+  const cells = 10;
+  const pct = Math.round(percent);
+  const filled = Math.max(0, Math.min(cells, Math.round((percent / 100) * cells)));
+  const color = pct < 50 ? T.ok : pct < 80 ? T.warn : T.bad;
+  const full = `${color}${G.barFull.repeat(filled)}${RESET}`;
+  const empty = `${T.faint}${G.barEmpty.repeat(cells - filled)}${RESET}`;
+  return `${full}${empty} ${color}${pct}%${RESET}`;
+}
+
+function pctOrDash(win) {
+  return win && win.usedPercent != null ? win.usedPercent : null;
+}
+
+// Short, human-readable label for a rate-limit window duration (e.g. "5h",
+// "7d", "1w"). Falls back to a generic "usage" when unknown.
+function windowLabel(seconds) {
+  if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return "usage";
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  if (seconds < 604800) return `${Math.round(seconds / 86400)}d`;
+  return `${Math.round(seconds / 604800)}w`;
+}
+
+// Resolves the plan to show: prefer the live usage plan, fall back to the
+// plan inferred from the login id_token.
+function usagePlanLabel(acc) {
+  const usage = acc.usage;
+  if (usage && !usage.error && usage.plan) return planLabel(usage.plan);
+  if (acc.plan) return planLabel(acc.plan);
+  return null;
+}
+
+// The detail lines shown beneath the account list for the selected account:
+// status, plan, 5h / weekly usage bars, and last activity time.
+function buildDetail(acc, usageLoading) {
+  if (!acc) return null;
+  const parts = [];
+  parts.push(statusOf(acc));
+
+  const plan = usagePlanLabel(acc);
+  if (plan) parts.push(`${DIM}${G.sep}${RESET} ${T.accent}${plan}${RESET}`);
+
+  const usage = acc.usage;
+  if (usage && !usage.error) {
+    const primary = pctOrDash(usage.primary);
+    const secondary = pctOrDash(usage.secondary);
+    if (primary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.primary.windowSeconds)}${RESET} ${bar(primary)}`);
+    if (secondary != null) parts.push(`${DIM}${G.sep} ${windowLabel(usage.secondary.windowSeconds)}${RESET} ${bar(secondary)}`);
+    if (primary == null && secondary == null) parts.push(`${DIM}${G.sep} no usage data${RESET}`);
+  } else if (usage && usage.error) {
+    parts.push(`${DIM}${G.sep} usage unavailable${RESET}`);
+  } else if (usageLoading) {
+    parts.push(`${DIM}${G.sep} fetching usage${G.ellipsis}${RESET}`);
+  }
+
+  const details = [parts.join(" ")];
+  const activity = relativeTime(acc.lastActivity);
+  if (activity) details.push(`${DIM}last activity: ${activity}${RESET}`);
+  return details;
+}
+
+function relativeTime(ms) {
+  if (!ms) return null;
+  const sec = Math.floor((Date.now() - ms) / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} minute${min === 1 ? "" : "s"} ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
+  const day = Math.floor(hr / 24);
+  return `${day} day${day === 1 ? "" : "s"} ago`;
+}
+
 function spaceN(n) {
   return n > 0 ? " ".repeat(n) : "";
 }
@@ -245,10 +331,22 @@ export function askLine(message) {
 }
 
 export async function selectAccountInteractive() {
-  // Enrich saved accounts with their login email for display.
+  // Enrich saved accounts with local metadata (email, plan, last activity)
+  // and the auth payload needed for live usage lookups.
   const load = () =>
-    listAccounts().accounts.map((a) => ({ ...a, email: accountEmail(a.name) }));
+    listAccounts().accounts.map((a) => {
+      const meta = accountMeta(a.name) || {};
+      return {
+        ...a,
+        email: meta.email,
+        plan: meta.plan,
+        lastActivity: meta.lastActivity,
+        _auth: meta, // internal; never rendered
+        usage: null,
+      };
+    });
   let full = load();
+  let usageLoading = false;
   let query = "";
   let mode = "nav";
   let hint = "";
@@ -306,7 +404,7 @@ export async function selectAccountInteractive() {
     // erasing any lines that are no longer part of the frame.
     if (prevHeight) process.stdout.write(MOVE_UP.repeat(prevHeight));
     process.stdout.write(GOTO_COL);
-    const frame = buildTemplate(visible(), index, { query, mode, hint, version });
+    const frame = buildTemplate(visible(), index, { query, mode, hint, version, usageLoading });
     const height = frame.length;
     const total = Math.max(height, prevHeight);
     for (let i = 0; i < total; i++) {
@@ -318,6 +416,21 @@ export async function selectAccountInteractive() {
   const renderClean = () => {
     process.stdout.write(CLEAR_SCREEN);
     prevHeight = 0;
+    render();
+  };
+
+  // Fetches live usage for every account that has tokens. Runs in the
+  // background and re-renders as results come in.
+  const refreshUsage = async () => {
+    const targets = full.filter((a) => a._auth && a._auth.accountId && a._auth.accessToken);
+    if (!targets.length) return;
+    usageLoading = true;
+    render();
+    const map = await fetchAllUsages(targets);
+    usageLoading = false;
+    for (const a of full) {
+      if (map[a.name]) a.usage = map[a.name];
+    }
     render();
   };
 
@@ -365,6 +478,7 @@ export async function selectAccountInteractive() {
       const { overwritten } = saveAccount(name);
       full = load();
       resume(`${T.ok}${G.check}${RESET} Saved '${name}'.${overwritten ? " (overwritten)" : ""}`);
+      refreshUsage();
     } catch (error) {
       resume(`${error.message}`);
     }
@@ -508,5 +622,6 @@ export async function selectAccountInteractive() {
     process.stdout.write(HIDE_CURSOR);
     process.stdin.on("keypress", onKeypress);
     renderClean();
+    refreshUsage();
   });
 }
