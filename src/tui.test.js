@@ -9,7 +9,9 @@ const join = (block) => text(block).join("\n");
 const maxWidth = (block) => Math.max(...text(block).map((l) => l.length));
 
 function acc(name, over = {}) {
-  return { name, active: false, matched: false, email: null, plan: null, lastActivity: null, usage: null, ...over };
+  const account = { name, active: false, matched: false, email: null, plan: null, lastActivity: null, usage: null, ...over };
+  account.status ??= account.active ? (account.matched ? "current" : "unsaved-login") : "saved";
+  return account;
 }
 
 const many = (n) => Array.from({ length: n }, (_, i) => acc(`account-${String(i).padStart(2, "0")}`));
@@ -87,16 +89,33 @@ test("a long email is clipped to the frame width instead of overflowing", () => 
 });
 
 // ── Status semantics ───────────────────────────────────────────────────────
-test("status badges show actionable CURRENT and AUTH CHANGED states only", () => {
+test("status badges distinguish current, updated, and unsaved logins", () => {
   const accounts = [
-    acc("current", { active: true, matched: true }),
-    acc("changed", { active: true, matched: false }),
+    acc("current", { active: true, matched: true, status: "current" }),
+    acc("updated", { active: true, matched: false, status: "session-updated" }),
+    acc("changed", { active: true, matched: false, status: "unsaved-login" }),
     acc("saved", { active: false, matched: false }),
   ];
   const joinAll = join(buildTemplate(accounts, 0, { columns: 90, rows: 24 }));
   assert.match(joinAll, /CURRENT/);
-  assert.match(joinAll, /AUTH CHANGED/);
-  assert.doesNotMatch(joinAll, /SAVED/);
+  assert.match(joinAll, /SESSION UPDATED/);
+  assert.match(joinAll, /UNSAVED LOGIN/);
+  const savedLine = text(buildTemplate(accounts, 0, { columns: 90, rows: 24 }))
+    .find((line) => line.includes("saved"));
+  assert.doesNotMatch(savedLine, /CURRENT|UPDATED|LOGIN/);
+});
+
+test("unsaved login state replaces usage with a recovery action", () => {
+  const account = acc("personal", { active: true, status: "unsaved-login" });
+  const all = join(buildTemplate([account], 0, {
+    columns: 90,
+    rows: 24,
+    liveEmail: "other@example.com",
+  }));
+  assert.match(all, /Account status · personal/);
+  assert.match(all, /Unsaved login detected/);
+  assert.match(all, /other@example.com/);
+  assert.match(all, /Press A to save it/);
 });
 
 test("plan label moves from the account row into the selected detail heading", () => {
@@ -140,6 +159,18 @@ test("fetching indicator shows while usage loads", () => {
   assert.match(all, /fetching usage/);
 });
 
+test("empty usage panel explains manual lookup and stale cached data", () => {
+  const empty = join(buildTemplate([acc("work")], 0, { columns: 90, rows: 24 }));
+  assert.match(empty, /Press U to load usage/);
+  assert.match(empty, /Only this account/);
+
+  const stale = join(buildTemplate([
+    acc("work", { usage: { plan: "plus", primary: { usedPercent: 10, windowSeconds: 3600 }, secondary: null, credits: null } }),
+  ], 0, { columns: 90, rows: 24, usageUpdatedAt: Date.now() - 2 * 86400 * 1000, usageStale: true }));
+  assert.match(stale, /Last known/);
+  assert.match(stale, /U refresh/);
+});
+
 test("usage panel height stays fixed whether or not data is present", () => {
   const withData = buildTemplate([acc("a", { usage: { plan: "plus", primary: { usedPercent: 50, windowSeconds: 3600 }, secondary: null, credits: null } })], 0, { columns: 90, rows: 24 });
   const without = buildTemplate([acc("b")], 0, { columns: 90, rows: 24 });
@@ -167,6 +198,14 @@ test("navigation toast reuses the footer instead of adding an empty top row", ()
   assert.ok(lines.findIndex((line) => line.includes("Switched to personal")) > lines.findIndex((line) => line.includes("Usage")));
 });
 
+test("navigation footer keeps core actions and moves secondary actions to help", () => {
+  const all = join(buildTemplate([acc("personal")], 0, { columns: 90, rows: 24 }));
+  assert.match(all, /Enter|↵/);
+  assert.match(all, /search/);
+  assert.match(all, /help/);
+  assert.doesNotMatch(all, /rename.*delete/);
+});
+
 // ── Modal modes ────────────────────────────────────────────────────────────
 test("add step 1 lists login methods and a keyboard footer", () => {
   const block = buildTemplate([acc("a")], 0, { columns: 90, rows: 24, mode: "add", addStep: 1, addMethod: "browser" });
@@ -178,10 +217,47 @@ test("add step 1 lists login methods and a keyboard footer", () => {
 });
 
 test("add step 2 shows a name prompt", () => {
-  const all = join(buildTemplate([acc("a")], 0, { columns: 90, rows: 24, mode: "add", addStep: 2, input: "work"}));
+  const all = join(buildTemplate([acc("a")], 0, {
+    columns: 90,
+    rows: 24,
+    mode: "add",
+    addStep: 2,
+    input: "work",
+    detectedEmail: "work@example.com",
+    detectedWorkspace: "…space-01",
+  }));
   assert.match(all, /Step 2 of 2/);
+  assert.match(all, /work@example.com/);
+  assert.match(all, /Workspace/);
   assert.match(all, /Save this login as/);
   assert.ok(all.includes("work"));
+});
+
+test("add step 2 blocks a duplicate before creating another profile", () => {
+  const all = join(buildTemplate([acc("a")], 0, {
+    columns: 90,
+    rows: 24,
+    mode: "add",
+    addStep: 2,
+    duplicateName: "personal",
+    detectedEmail: "me@example.com",
+  }));
+  assert.match(all, /Already saved as 'personal'/);
+  assert.doesNotMatch(all, /Save this login as/);
+});
+
+test("empty, help, and daily-refresh consent screens stay inside the frame", () => {
+  const empty = join(buildTemplate([], 0, { columns: 60, rows: 24, mode: "empty" }));
+  assert.match(empty, /No accounts saved yet/);
+  assert.match(empty, /Add your first Codex account/);
+
+  const help = join(buildTemplate([acc("a")], 0, { columns: 60, rows: 24, mode: "help" }));
+  assert.match(help, /Keyboard help/);
+  assert.match(help, /Shift\+U/);
+
+  const consent = join(buildTemplate([acc("a")], 0, { columns: 60, rows: 24, mode: "usage-consent" }));
+  assert.match(consent, /Daily usage refresh/);
+  assert.match(consent, /manual only/);
 });
 
 test("rename and delete modals render their prompts and confirm", () => {

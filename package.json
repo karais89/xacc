@@ -1,6 +1,6 @@
 {
   "name": "@karais89/xacc",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Minimal Codex CLI account switcher. Saves and swaps auth.json snapshots and shows plan + usage status per account.",
   "type": "module",
   "bin": {

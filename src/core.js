@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { removeUsageResult } from "./usage-cache.js";
 
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -103,9 +104,33 @@ function matchLiveAuth() {
 
 export function getActiveAccount() {
   const matched = matchLiveAuth();
-  if (matched) return { name: matched, matched: true };
+  if (matched) return { name: matched, matched: true, status: "current" };
   const recorded = readState();
-  if (recorded) return { name: recorded, matched: false };
+  if (recorded) {
+    const saved = accountFile(recorded);
+    const auth = authFile();
+    if (!fs.existsSync(auth)) {
+      return { name: recorded, matched: false, status: "auth-missing" };
+    }
+    const liveKey = identityKey(readJson(auth));
+    const savedKey = fs.existsSync(saved) ? identityKey(readJson(saved)) : null;
+    if (liveKey && savedKey && liveKey === savedKey) {
+      return { name: recorded, matched: false, status: "session-updated" };
+    }
+    if (liveKey) {
+      const candidates = listSnapshots().filter(
+        (name) => identityKey(readJson(accountFile(name))) === liveKey
+      );
+      if (candidates.length === 1) {
+        return { name: candidates[0], matched: false, status: "session-updated" };
+      }
+    }
+    return {
+      name: recorded,
+      matched: false,
+      status: "unsaved-login",
+    };
+  }
   return null;
 }
 
@@ -139,7 +164,8 @@ export function listAccounts() {
   const accounts = listSnapshots().map((name) => ({
     name,
     active: active ? active.name === name : false,
-    matched: active ? active.matched : false,
+    matched: active && active.name === name ? active.matched : false,
+    status: active && active.name === name ? active.status : "saved",
   }));
   return { accounts, active };
 }
@@ -185,6 +211,11 @@ export function switchAccount(name) {
     }
   }
 
+  if (matchLiveAuth() === name) {
+    writeState(name);
+    return { name, backedUp: false, unchanged: true };
+  }
+
   let backedUp = false;
   if (live && backupName && fs.existsSync(accountFile(backupName))) {
     if (sha256(auth) !== sha256(accountFile(backupName))) {
@@ -195,7 +226,7 @@ export function switchAccount(name) {
 
   writeFileAtomic(auth, fs.readFileSync(target));
   writeState(name);
-  return { name, backedUp };
+  return { name, backedUp, unchanged: false };
 }
 
 export function removeAccount(name) {
@@ -204,7 +235,14 @@ export function removeAccount(name) {
   if (!fs.existsSync(file)) {
     throw new Error(`Unknown account '${name}'. Nothing to remove.`);
   }
+  const key = profileKey(readJson(file));
   fs.unlinkSync(file);
+  try {
+    removeUsageResult(key);
+  } catch {
+    // Removing the credential snapshot is the primary action. A stale,
+    // non-secret usage cache entry must not prevent account removal.
+  }
   const state = readState();
   if (state === name) {
     fs.rmSync(stateFile(), { force: true });
@@ -294,6 +332,27 @@ function identityKey(data) {
   const user = userIdentityKey(data);
   if (!user) return null;
   return `${user}|workspace:${workspaceIdentity(data) || "none"}`;
+}
+
+function profileKey(data) {
+  const identity = identityKey(data);
+  return identity
+    ? crypto.createHash("sha256").update(identity).digest("hex")
+    : null;
+}
+
+// Returns another saved profile matching the live auth's user + workspace,
+// before the live auth is stored under a new name.
+export function duplicateLiveAccount() {
+  const auth = authFile();
+  if (!fs.existsSync(auth)) return null;
+  const key = identityKey(readJson(auth));
+  if (!key) return null;
+  return (
+    listSnapshots().find(
+      (name) => identityKey(readJson(accountFile(name))) === key
+    ) || null
+  );
 }
 
 // Returns the name of another saved account that is the same identity as
@@ -396,7 +455,39 @@ export function accountMeta(name) {
     plan: normalizePlan(authClaim.chatgpt_plan_type),
     accountId: data?.tokens?.account_id || null,
     accessToken: data?.tokens?.access_token || null,
+    profileKey: profileKey(data),
     lastActivity,
+  };
+}
+
+// Local metadata for the live Codex auth, used to preview a completed login
+// before saving it. Raw tokens are never returned.
+export function liveAccountMeta() {
+  const file = authFile();
+  if (!fs.existsSync(file)) return null;
+  const data = readJson(file);
+  if (!data) return null;
+  const claims = claimsFromAuth(data);
+  const authClaim = claims["https://api.openai.com/auth"] || {};
+  return {
+    email: emailFromAuth(data),
+    plan: normalizePlan(authClaim.chatgpt_plan_type),
+    accountId: workspaceIdentity(data),
+    profileKey: profileKey(data),
+  };
+}
+
+// Auth payload used only for a selected-account usage request. Callers must
+// keep these values internal and must never render or cache them.
+export function liveAccountUsageMeta() {
+  const file = authFile();
+  if (!fs.existsSync(file)) return null;
+  const data = readJson(file);
+  if (!data) return null;
+  return {
+    accountId: workspaceIdentity(data),
+    accessToken: data?.tokens?.access_token || null,
+    profileKey: profileKey(data),
   };
 }
 

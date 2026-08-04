@@ -9,9 +9,12 @@ import {
   accountMeta,
   authFile,
   duplicateAccountOf,
+  duplicateLiveAccount,
   getActiveAccount,
   isLoggedIn,
   listAccounts,
+  liveAccountMeta,
+  liveAccountUsageMeta,
   normalizePlan,
   planLabel,
   removeAccount,
@@ -44,6 +47,7 @@ test("save/list/current round trip", (t) => {
   saveAccount("personal");
   assert.equal(getActiveAccount().name, "personal");
   assert.equal(getActiveAccount().matched, true);
+  assert.equal(getActiveAccount().status, "current");
 
   const { accounts } = listAccounts();
   assert.equal(accounts.length, 1);
@@ -64,6 +68,45 @@ test("switch swaps auth and records current", (t) => {
   assert.equal(fs.readFileSync(authFile(), "utf-8"), "TOKEN-A");
   assert.equal(getActiveAccount().name, "personal");
   assert.equal(getActiveAccount().matched, true);
+});
+
+test("switching to the exact current account is a no-op", (t) => {
+  setup(t);
+  writeAuth("TOKEN-A");
+  saveAccount("personal");
+  const result = switchAccount("personal");
+  assert.equal(result.unchanged, true);
+  assert.equal(result.backedUp, false);
+});
+
+test("active detection follows a known live identity instead of stale recorded state", (t) => {
+  setup(t);
+  const auth = (user, workspace, token) => {
+    const payload = Buffer.from(
+      JSON.stringify({
+        email: `${user}@example.com`,
+        "https://api.openai.com/auth": {
+          chatgpt_user_id: user,
+          chatgpt_account_id: workspace,
+        },
+      })
+    ).toString("base64url");
+    return JSON.stringify({
+      tokens: { id_token: `h.${payload}.s`, account_id: workspace, access_token: token },
+    });
+  };
+
+  writeAuth(auth("personal", "home", "p1"));
+  saveAccount("personal");
+  writeAuth(auth("work", "company", "w1"));
+  saveAccount("work");
+  switchAccount("personal");
+
+  // An out-of-band login refreshed a different profile already known to xacc.
+  writeAuth(auth("work", "company", "w2"));
+  const active = getActiveAccount();
+  assert.equal(active.name, "work");
+  assert.equal(active.status, "session-updated");
 });
 
 test("switch auto-backs up refreshed live auth into the matching account", (t) => {
@@ -98,6 +141,7 @@ test("switch auto-backs up refreshed live auth into the matching account", (t) =
   // points at personal.
   const refreshed = auth("user-a", "workspace-a", "token-a-refreshed");
   writeAuth(refreshed);
+  assert.equal(getActiveAccount().status, "session-updated");
 
   // Switching away must write the refreshed token back into 'personal'.
   switchAccount("work");
@@ -115,6 +159,7 @@ test("switch refuses to overwrite a saved profile with an unknown live login", (
   switchAccount("personal");
 
   writeAuth("OUT-OF-BAND-LOGIN");
+  assert.equal(getActiveAccount().status, "unsaved-login");
   const personalPath = path.join(accHome, "accounts", "personal.auth.json");
   assert.throws(() => switchAccount("work"), /does not match a saved account/);
   assert.equal(fs.readFileSync(personalPath, "utf-8"), "TOKEN-A");
@@ -244,8 +289,44 @@ test("accountMeta exposes email, plan, tokens, and last activity", (t) => {
   assert.equal(meta.plan, "plus");
   assert.equal(meta.accountId, "acc-123");
   assert.equal(meta.accessToken, "tok-abc");
+  assert.match(meta.profileKey, /^[a-f0-9]{64}$/);
   assert.ok(meta.lastActivity > 0);
   assert.equal(accountMeta("missing"), null);
+});
+
+test("live account preview finds an existing user and workspace before save", (t) => {
+  setup(t);
+  const payload = Buffer.from(
+    JSON.stringify({
+      email: "same@example.com",
+      "https://api.openai.com/auth": {
+        chatgpt_user_id: "user-1",
+        chatgpt_account_id: "workspace-1",
+        chatgpt_plan_type: "plus",
+      },
+    })
+  ).toString("base64url");
+  const login = JSON.stringify({
+    tokens: {
+      id_token: `h.${payload}.s`,
+      account_id: "workspace-1",
+      access_token: "token-a",
+    },
+  });
+  writeAuth(login);
+  saveAccount("personal");
+
+  writeAuth(login.replace("token-a", "token-b"));
+  assert.equal(duplicateLiveAccount(), "personal");
+  const meta = liveAccountMeta();
+  assert.equal(meta.email, "same@example.com");
+  assert.equal(meta.plan, "plus");
+  assert.equal(meta.accountId, "workspace-1");
+  assert.match(meta.profileKey, /^[a-f0-9]{64}$/);
+  const usageMeta = liveAccountUsageMeta();
+  assert.equal(usageMeta.accountId, "workspace-1");
+  assert.equal(usageMeta.accessToken, "token-b");
+  assert.equal(usageMeta.profileKey, meta.profileKey);
 });
 
 test("duplicateAccountOf distinguishes users by id_token identity, not account_id", (t) => {

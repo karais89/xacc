@@ -132,9 +132,13 @@ try {
         runPicker(selectAccountInteractive());
         break;
       }
-      const { backedUp } = switchAccount(name);
-      console.log(`Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`);
-      console.log("Restart Codex if it is already running.");
+      const { backedUp, unchanged } = switchAccount(name);
+      if (unchanged) {
+        console.log(`'${name}' is already current.`);
+      } else {
+        console.log(`Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`);
+        console.log("Restart Codex if it is already running.");
+      }
       break;
     }
     case "list": {
@@ -152,14 +156,18 @@ try {
             : "~"
           : " ";
         const state = account.active
-          ? account.matched
-            ? "active"
-            : "recorded (live auth differs)"
+          ? account.status === "current"
+            ? "current"
+            : account.status === "session-updated"
+              ? "session updated"
+              : account.status === "auth-missing"
+                ? "auth missing"
+                : "unsaved login detected"
           : "";
         console.log(`${marker} ${account.name}${state ? ` ${DIM}(${state})${RESET}` : ""}`);
       }
       if (onlyActive && active && !active.matched) {
-        console.log(`${DIM}~ recorded current account (live auth differs from saved snapshot)${RESET}`);
+        console.log(`${DIM}~ recorded account is not an exact match for live auth${RESET}`);
       }
       break;
     }
@@ -167,10 +175,10 @@ try {
       const active = getActiveAccount();
       if (!active) {
         console.log("No active account detected.");
-      } else if (active.matched) {
+      } else if (active.status === "current") {
         console.log(active.name);
       } else {
-        console.log(`${active.name} (recorded, live auth differs from saved snapshot)`);
+        console.log(`${active.name} (${active.status.replaceAll("-", " ")})`);
       }
       break;
     }

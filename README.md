@@ -53,24 +53,28 @@ only at startup).
 xacc tui
 ```
 
-A bordered terminal UI to pick and manage accounts, with a persistent status
-line and an incremental filter:
+A bordered terminal UI to pick and manage accounts, with contextual status,
+cached usage, and an incremental name/email filter. Empty states and account
+login stay inside the TUI instead of sending you back to the shell.
 
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` | Move selection |
 | `Enter` | Switch to the selected account |
-| `/` | Search / filter accounts by name |
+| `/` | Search / filter accounts by name or email |
 | `u` | Request live usage for the selected account |
+| `Shift+U` | Toggle daily usage refresh for the current account |
 | `a` | Add an account (runs `codex login`, suggests a name from the logged-in email) |
 | `r` | Rename the selected account |
 | `d` | Delete the selected account (asks for confirmation) |
+| `?` | Show keyboard help |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
-The active account is marked with a colored badge (`active` / `stale` when the
-live auth has drifted from the saved snapshot). If you are logged in but have
-no saved accounts, the TUI lets you save the current login as your first
-profile instead of bailing out.
+The active account is labeled `CURRENT`, `SESSION UPDATED`, `UNSAVED LOGIN`, or
+`AUTH MISSING`. A session update means the same user/workspace refreshed its
+credentials; an unsaved login means the live auth belongs to something else
+and should be saved before switching. The add flow previews the detected email
+and workspace and blocks duplicate user/workspace profiles before saving.
 
 ## Commands
 
@@ -92,6 +96,9 @@ profile instead of bailing out.
 - **Snapshots**: `~/.codex-acc/accounts/<name>.auth.json` (override with
   `CODEX_ACC_HOME`).
 - **State**: `~/.codex-acc/current.json` records the last used account.
+- **Usage cache**: `~/.codex-acc/usage-cache.json` stores only normalized usage
+  values, timestamps, and the manual/daily preference. It does not contain
+  access tokens, refresh tokens, account IDs, or raw backend responses.
 - **Identity**: profiles are compared using both the ChatGPT user identity and
   workspace/account ID. The same user in two workspaces remains two profiles,
   and two users in one workspace remain separate accounts.
@@ -106,8 +113,7 @@ profile instead of bailing out.
 
 ## Usage lookup and privacy
 
-Opening the TUI does not request usage. Pressing `u` sends the selected
-account's access token and workspace/account ID over HTTPS to
+Pressing `u` sends the selected account's access token and workspace/account ID over HTTPS to
 `https://chatgpt.com/backend-api/wham/usage`. xacc uses the response only for
 the on-screen usage panel; it does not send analytics or request usage for
 other saved accounts.
@@ -116,6 +122,14 @@ The lookup is read-only. An expired token produces `usage unavailable`; xacc
 does not use refresh tokens or rewrite saved credentials as part of a usage
 lookup. This backend endpoint is an implementation dependency and may change
 independently of xacc.
+
+Successful results are cached locally and shown immediately on the next TUI
+run. After the first successful manual lookup, xacc asks once whether to enable
+daily refresh. In daily mode, opening the TUI performs at most one lookup for
+the exact current account when its successful cache is at least 24 hours old.
+There is no scheduler or background process, and failures keep the last cached
+result while suppressing repeated automatic attempts for one hour. Use
+`Shift+U` to switch between manual and daily mode later.
 
 ## Tests
 

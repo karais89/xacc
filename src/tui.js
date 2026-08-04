@@ -4,8 +4,11 @@ import { createRequire } from "node:module";
 import {
   accountMeta,
   duplicateAccountOf,
+  duplicateLiveAccount,
   isLoggedIn,
   listAccounts,
+  liveAccountMeta,
+  liveAccountUsageMeta,
   planLabel,
   readAuth,
   removeAccount,
@@ -18,6 +21,15 @@ import {
 } from "./core.js";
 import { runCodexLogin } from "./login.js";
 import { fetchUsage } from "./usage.js";
+import {
+  isUsageCacheStale,
+  readUsageCache,
+  recordUsageAttempt,
+  saveUsageResult,
+  setUsageRefreshMode,
+  shouldAutoRefresh,
+  usageCacheEntry,
+} from "./usage-cache.js";
 
 const require = createRequire(import.meta.url);
 const version = require("../package.json").version;
@@ -52,8 +64,6 @@ const T = buildTheme();
 
 // Aliases used by the interactive flows below.
 const DIM = T.dim;
-const CYAN = T.accent;
-const GREEN = T.ok;
 
 // ── Glyph set: box drawing needs a modern terminal; fall back to ASCII. ────
 // A terminal that reports 256+ colors almost always renders Unicode glyphs,
@@ -112,8 +122,12 @@ function computeLayout(columns, rows) {
 
 function statusLabel(acc) {
   if (!acc.active) return { text: "", color: "" };
-  if (acc.matched) return { text: `${G.dotActive} CURRENT`, color: T.ok };
-  return { text: `${G.dotStale} AUTH CHANGED`, color: T.warn };
+  if (acc.status === "current") return { text: `${G.dotActive} CURRENT`, color: T.ok };
+  if (acc.status === "session-updated") {
+    return { text: `${G.dotStale} SESSION UPDATED`, color: T.warn };
+  }
+  if (acc.status === "auth-missing") return { text: `! AUTH MISSING`, color: T.bad };
+  return { text: `! UNSAVED LOGIN`, color: T.bad };
 }
 
 // Returns the scroll offset that keeps `index` visible inside a `pageSize`
@@ -162,11 +176,19 @@ function renderDetailPanel(acc, ctx, opts) {
   };
 
   const content = [];
+  const statusPanel = acc?.active && ["unsaved-login", "auth-missing"].includes(acc.status);
   if (acc) {
     // Below 48 cols the email is hidden from the list, so surface it here.
-    if (!showListEmail && acc.email) content.push(`${DIM}${acc.email}${RESET}`);
+    if (!showListEmail && acc.email && !statusPanel) content.push(`${DIM}${acc.email}${RESET}`);
     const usage = acc.usage;
-    if (usage && !usage.error) {
+    if (acc.active && acc.status === "unsaved-login") {
+      content.push(`${T.bad}Unsaved login detected${RESET}`);
+      if (opts.liveEmail) content.push(`${DIM}Live${RESET}  ${opts.liveEmail}`);
+      content.push(`${DIM}Press A to save it before switching.${RESET}`);
+    } else if (acc.active && acc.status === "auth-missing") {
+      content.push(`${T.bad}Live Codex auth is missing${RESET}`);
+      content.push(`${DIM}Press A to sign in again.${RESET}`);
+    } else if (usage && !usage.error) {
       const primary = pctOrDash(usage.primary);
       const secondary = pctOrDash(usage.secondary);
       const credits =
@@ -186,17 +208,32 @@ function renderDetailPanel(acc, ctx, opts) {
     } else if (opts.usageLoading) {
       content.push(`${DIM}fetching usage${G.ellipsis}${RESET}`);
     } else {
-      content.push(`${DIM}no usage data yet${RESET}`);
+      content.push(`${DIM}Press U to load usage${RESET}`);
+      content.push(`${T.faint}Only this account will be queried.${RESET}`);
     }
-    if (opts.usageUpdatedAt) {
-      content.push(`${DIM}Updated${RESET}  ${relativeTime(opts.usageUpdatedAt)}`);
+    if (opts.usageUpdatedAt && opts.usageLoading) {
+      content.push(`${DIM}Refreshing${G.ellipsis} · showing ${relativeTime(opts.usageUpdatedAt)} data${RESET}`);
+    } else if (opts.usageUpdatedAt && opts.usageRefreshFailed) {
+      content.push(`${T.warn}Update failed${RESET}${DIM} · showing ${relativeTime(opts.usageUpdatedAt)} data${RESET}`);
+    } else if (opts.usageUpdatedAt) {
+      content.push(
+        `${DIM}${opts.usageStale ? "Last known" : "Updated"}${RESET}  ${relativeTime(opts.usageUpdatedAt)}${DIM} · U refresh${RESET}`
+      );
     } else if (acc.lastActivity) {
       content.push(`${DIM}last activity${RESET}  ${relativeTime(acc.lastActivity)}`);
     }
   }
 
   const plan = acc ? usagePlanLabel(acc) : null;
-  lines.push(divider(acc ? ["Usage", acc.name, plan].filter(Boolean).join(" · ") : ""));
+  lines.push(
+    divider(
+      acc
+        ? statusPanel
+          ? `Account status · ${acc.name}`
+          : ["Usage", acc.name, plan].filter(Boolean).join(" · ")
+        : ""
+    )
+  );
   for (let i = 0; i < detailRows; i++) {
     lines.push(content[i] ? line(content[i]) : blank());
   }
@@ -208,24 +245,19 @@ function renderDetailPanel(acc, ctx, opts) {
 function renderFooter(mode, ctx, hint = "") {
   const { inner } = ctx;
   const line = ctx.line;
+  const blank = ctx.blank;
   const compact = inner < 44;
   const sep = compact ? `${DIM}  ${RESET}` : `${T.faint} ${G.sep} ${RESET}`;
   const D = (s) => `${DIM}${s}${RESET}`;
   if (mode === "search") {
     return [
+      hint ? line(hint) : blank(),
       line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("Esc")} close`),
-      line(`${D("type")} filter${sep}${D(G.back)} erase${sep}${D("u")} usage`),
-    ];
-  }
-  if (hint) {
-    return [
-      line(hint),
-      line(`${D("u")} usage${sep}${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
     ];
   }
   return [
-    line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("/")} search`),
-    line(`${D("u")} usage${sep}${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
+    hint ? line(hint) : blank(),
+    line(`${D(G.up)}/${D(G.down)} move${sep}${D(G.enter)} switch${sep}${D("a")} add${sep}${D("/")} search${sep}${D("?")} help`),
   ];
 }
 
@@ -237,6 +269,9 @@ export function buildTemplate(accounts, index, opts = {}) {
     version = "",
     usageLoading = false,
     usageUpdatedAt = null,
+    usageStale = false,
+    usageRefreshFailed = false,
+    liveEmail = "",
     columns = process.stdout.columns || 80,
     rows = process.stdout.rows || 24,
     input = "",
@@ -244,6 +279,10 @@ export function buildTemplate(accounts, index, opts = {}) {
     addMethod = "browser",
     confirmName = "",
     suggested = "default",
+    detectedEmail = "",
+    detectedWorkspace = "",
+    duplicateName = "",
+    emptyLoggedIn = false,
     totalCount = accounts.length,
   } = opts;
 
@@ -281,7 +320,7 @@ export function buildTemplate(accounts, index, opts = {}) {
   if (displayWidth(titleText) > budget) titleText = clip(titleText, Math.max(0, budget - 1));
   lines.push(`${left}${titleText}${spaceN(budget - displayWidth(titleText))}${right}`);
 
-  const isModal = mode === "add" || mode === "rename" || mode === "delete";
+  const isModal = ["add", "rename", "delete", "help", "empty", "usage-consent"].includes(mode);
   // Search needs a visible input row. Modal validation errors stay near their
   // prompt; navigation toasts reuse the footer instead of reserving empty
   // space beneath the title.
@@ -291,7 +330,18 @@ export function buildTemplate(accounts, index, opts = {}) {
     lines.push(line(hint));
   }
   if (isModal) {
-    renderModal(lines, ctx, { mode, input, addStep, addMethod, confirmName, suggested });
+    renderModal(lines, ctx, {
+      mode,
+      input,
+      addStep,
+      addMethod,
+      confirmName,
+      suggested,
+      detectedEmail,
+      detectedWorkspace,
+      duplicateName,
+      emptyLoggedIn,
+    });
     lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
     return lines;
   }
@@ -336,7 +386,14 @@ export function buildTemplate(accounts, index, opts = {}) {
   }
 
   // ── Detail / usage panel ─────────────────────────────────────────────────
-  for (const d of renderDetailPanel(selected, ctx, { usageLoading, usageUpdatedAt, query })) {
+  for (const d of renderDetailPanel(selected, ctx, {
+    usageLoading,
+    usageUpdatedAt,
+    usageStale,
+    usageRefreshFailed,
+    liveEmail,
+    query,
+  })) {
     lines.push(d);
   }
 
@@ -356,6 +413,44 @@ function renderModal(lines, ctx, o) {
   const blank = ctx.blank;
   const D = (s) => `${DIM}${s}${RESET}`;
 
+  if (o.mode === "empty") {
+    lines.push(blank());
+    lines.push(line(`${T.accent}No accounts saved yet${RESET}`));
+    lines.push(blank());
+    lines.push(
+      line(
+        o.emptyLoggedIn
+          ? `${DIM}Save the current Codex login as your first account.${RESET}`
+          : `${DIM}Add your first Codex account without leaving xacc.${RESET}`
+      )
+    );
+    lines.push(blank());
+    lines.push(line(`${D(G.enter)} continue${ctx.sep}${D("q")} quit`));
+    return;
+  }
+
+  if (o.mode === "help") {
+    lines.push(line(`${T.accent}Keyboard help${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${D(G.enter)} switch account${ctx.sep}${D("u")} refresh selected usage`));
+    lines.push(line(`${D("Shift+U")} toggle daily usage refresh`));
+    lines.push(line(`${D("r")} rename${ctx.sep}${D("d")} delete${ctx.sep}${D("/")} search`));
+    lines.push(blank());
+    lines.push(line(`${D("Esc")} close help`));
+    return;
+  }
+
+  if (o.mode === "usage-consent") {
+    lines.push(line(`${T.accent}Daily usage refresh${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${DIM}Refresh the current account once a day when xacc opens?${RESET}`));
+    lines.push(line(`${T.faint}No background process and no token refresh.${RESET}`));
+    lines.push(blank());
+    lines.push(line(`${T.ok}y${RESET} daily${ctx.sep}${D("n")} manual only`));
+    lines.push(line(`${D("Shift+U")} change this later`));
+    return;
+  }
+
   if (o.mode === "add") {
     if (o.addStep === 1) {
       lines.push(line(`${T.accent}Add account · Step 1 of 2${RESET}`));
@@ -371,7 +466,16 @@ function renderModal(lines, ctx, o) {
       lines.push(line(`${D(G.up)}/${D(G.down)} choose method`));
     } else {
       lines.push(line(`${T.accent}Add account · Step 2 of 2${RESET}`));
-      lines.push(blank());
+      lines.push(line(`${DIM}Signed in as${RESET}  ${o.detectedEmail || "ChatGPT account"}`));
+      if (o.detectedWorkspace) {
+        lines.push(line(`${DIM}Workspace${RESET}  ${o.detectedWorkspace}`));
+      }
+      if (o.duplicateName) {
+        lines.push(line(`${T.warn}Already saved as '${o.duplicateName}'${RESET}`));
+        lines.push(blank());
+        lines.push(line(`${D("Esc")} return without creating a duplicate`));
+        return;
+      }
       lines.push(line(`${DIM}Save this login as:${RESET}`));
       lines.push(blank());
       const shown = o.input ? o.input : D(`(default: ${o.suggested})`);
@@ -506,23 +610,35 @@ export function askLine(message) {
 export async function selectAccountInteractive() {
   // Enrich saved accounts with local metadata (email, plan, last activity)
   // and the auth payload needed for live usage lookups.
-  const load = () =>
-    listAccounts().accounts.map((a) => {
+  let usageCache = readUsageCache();
+  const load = () => {
+    const liveUsage = liveAccountUsageMeta();
+    return listAccounts().accounts.map((a) => {
       const meta = accountMeta(a.name) || {};
+      const cached = usageCacheEntry(usageCache, meta.profileKey);
+      const canUseLiveUsage =
+        a.active &&
+        ["current", "session-updated"].includes(a.status) &&
+        liveUsage?.profileKey &&
+        liveUsage.profileKey === meta.profileKey;
       return {
         ...a,
         email: meta.email,
         plan: meta.plan,
         lastActivity: meta.lastActivity,
-        _auth: meta, // internal; never rendered
-        usage: null,
-        usageUpdatedAt: null,
+        _auth: canUseLiveUsage ? { ...meta, ...liveUsage } : meta, // internal; never rendered
+        usage: cached?.usage || null,
+        usageUpdatedAt: cached?.fetchedAt || null,
+        usageStale: isUsageCacheStale(cached),
+        usageRefreshFailed: false,
       };
     });
+  };
   let full = load();
   let usageLoadingName = null;
   let query = "";
-  let mode = "nav";
+  let emptyLoggedIn = isLoggedIn();
+  let mode = full.length ? "nav" : "empty";
   let hint = "";
   let prevHeight = 0;
   let finished = false;
@@ -535,45 +651,32 @@ export async function selectAccountInteractive() {
   let suggested = "default";
   let addPriorAuth = null;
   let addHasAuthenticated = false;
+  let detectedEmail = "";
+  let detectedWorkspace = "";
+  let duplicateName = "";
 
   const visible = () => {
     if (!query.trim()) return full;
     const q = query.toLowerCase();
-    return full.filter((a) => a.name.toLowerCase().includes(q));
+    return full.filter(
+      (a) => a.name.toLowerCase().includes(q) || a.email?.toLowerCase().includes(q)
+    );
   };
 
   let list = visible();
   let index = Math.max(0, list.findIndex((a) => a.active));
 
-  // ── Empty-state handling ─────────────────────────────────────────────────
-  if (full.length === 0) {
-    if (!isLoggedIn()) {
-      if (process.stdin.isTTY) {
-        process.stdout.write(CLEAR_SCREEN);
-        console.log(`${DIM}not logged in${RESET} — run ${CYAN}codex login${RESET} first, then ${CYAN}xacc tui${RESET} again.`);
-        return null;
-      }
+  // Non-interactive invocations remain plain text; interactive empty states
+  // stay inside the TUI and lead directly into the add flow.
+  if (!process.stdin.isTTY) {
+    if (full.length === 0 && !isLoggedIn()) {
       console.log("Not logged in yet. Run 'codex login' first, then run 'xacc tui'.");
       return null;
     }
-    if (process.stdin.isTTY) {
-      process.stdout.write(CLEAR_SCREEN);
-      console.log(`You're logged in but have no saved accounts yet.`);
-      const answer = await askLine(`Save this login as (default '${suggestAccountName() || "default"}'): `);
-      const name = answer.trim() || suggestAccountName() || "default";
-      try {
-        saveAccount(name);
-        console.log(`${T.ok}${G.check}${RESET} Saved the current login as '${name}'.`);
-      } catch (error) {
-        console.error(`Error: ${error.message}`);
-      }
+    if (full.length === 0) {
+      console.log("You are logged in but no accounts are saved. Run 'xacc save <name>'.");
       return null;
     }
-    console.log("You are logged in but no accounts are saved. Run 'xacc save <name>'.");
-    return null;
-  }
-
-  if (!process.stdin.isTTY) {
     console.log("Recorded accounts (run 'xacc tui' in an interactive terminal to pick):");
     for (const account of full) {
       console.log(` ${account.active ? (account.matched ? "*" : "~") : " "} ${account.name}`);
@@ -590,6 +693,9 @@ export async function selectAccountInteractive() {
     process.stdout.write(GOTO_COL);
     const renderedAccounts = visible();
     const selected = selectedAccount(renderedAccounts, index);
+    const livePreview = selected?.active && selected.status === "unsaved-login"
+      ? liveAccountMeta()
+      : null;
     const frame = buildTemplate(renderedAccounts, index, {
       query,
       mode,
@@ -597,11 +703,18 @@ export async function selectAccountInteractive() {
       version,
       usageLoading: selected?.name === usageLoadingName,
       usageUpdatedAt: selected?.usageUpdatedAt || null,
+      usageStale: selected?.usageStale || false,
+      usageRefreshFailed: selected?.usageRefreshFailed || false,
+      liveEmail: livePreview?.email || "",
       input,
       addStep,
       addMethod,
       confirmName,
       suggested,
+      detectedEmail,
+      detectedWorkspace,
+      duplicateName,
+      emptyLoggedIn,
       totalCount: full.length,
     });
     const height = frame.length;
@@ -620,22 +733,39 @@ export async function selectAccountInteractive() {
 
   let usageAbort = new AbortController();
 
-  // Usage is an explicit, selected-account action. Opening the TUI, moving the
-  // selection, saving, and switching remain local-only operations.
-  const refreshUsage = async () => {
+  const updateDetectedLogin = () => {
+    const meta = liveAccountMeta() || {};
+    detectedEmail = meta.email || "";
+    detectedWorkspace = meta.accountId
+      ? `…${String(meta.accountId).slice(-8)}`
+      : "";
+    duplicateName = duplicateLiveAccount() || "";
+  };
+
+  // Manual refresh targets the selected account. Daily refresh is checked
+  // only when the TUI opens and targets the exact current account.
+  const refreshUsage = async ({ target = list[index], automatic = false } = {}) => {
     if (finished) return;
-    const target = list[index];
+    if (target?.active && ["unsaved-login", "auth-missing"].includes(target.status)) {
+      if (!automatic) {
+        hint = "Save or restore the live login before requesting usage.";
+        render();
+      }
+      return;
+    }
     if (!target?._auth?.accountId || !target?._auth?.accessToken) {
-      hint = "Usage is unavailable for this account.";
-      render();
+      if (!automatic) {
+        hint = "Usage is unavailable for this account.";
+        render();
+      }
       return;
     }
     usageAbort.abort();
     const controller = new AbortController();
     usageAbort = controller;
     usageLoadingName = target.name;
-    target.usage = null;
-    target.usageUpdatedAt = null;
+    target.usageRefreshFailed = false;
+    usageCache = recordUsageAttempt(target._auth.profileKey);
     hint = "";
     render();
     try {
@@ -643,19 +773,48 @@ export async function selectAccountInteractive() {
       if (finished || usageAbort !== controller) return;
       const current = full.find((account) => account.name === target.name);
       if (current) {
+        const now = Date.now();
         current.usage = usage;
-        current.usageUpdatedAt = Date.now();
+        current.usageUpdatedAt = now;
+        current.usageStale = false;
+        current.usageRefreshFailed = false;
+        usageCache = saveUsageResult(current._auth.profileKey, usage, now);
+        if (!automatic && usageCache.refreshMode == null && current._auth.profileKey) {
+          mode = "usage-consent";
+        }
       }
     } catch (error) {
       if (finished || usageAbort !== controller) return;
       const current = full.find((account) => account.name === target.name);
-      if (current) current.usage = { error: error?.message || "usage unavailable" };
+      if (current) {
+        current.usageRefreshFailed = true;
+        if (!current.usage) {
+          current.usage = { error: error?.message || "usage unavailable" };
+        }
+      }
     } finally {
       if (!finished && usageAbort === controller) {
         usageLoadingName = null;
         render();
       }
     }
+  };
+
+  const setDailyRefresh = (enabled) => {
+    usageCache = setUsageRefreshMode(enabled ? "daily" : "manual");
+    mode = full.length ? "nav" : "empty";
+    hint = enabled
+      ? `${T.ok}${G.check}${RESET} Daily usage refresh enabled.`
+      : "Usage refresh set to manual only.";
+    render();
+    const current = full.find((account) => account.active && account.status === "current");
+    if (enabled && current && shouldAutoRefresh(usageCache, current._auth.profileKey)) {
+      refreshUsage({ target: current, automatic: true });
+    }
+  };
+
+  const toggleDailyRefresh = () => {
+    setDailyRefresh(usageCache.refreshMode !== "daily");
   };
 
   const refreshList = () => {
@@ -691,6 +850,26 @@ export async function selectAccountInteractive() {
     process.stdin.resume();
   };
 
+  const beginAdd = ({ saveCurrent = false } = {}) => {
+    addPriorAuth = readAuth();
+    addHasAuthenticated = saveCurrent;
+    mode = "add";
+    addMethod = "browser";
+    hint = "";
+    if (saveCurrent) {
+      updateDetectedLogin();
+      suggested = suggestAccountName() || "default";
+      input = suggested === "default" ? "" : suggested;
+      addStep = 2;
+    } else {
+      detectedEmail = "";
+      detectedWorkspace = "";
+      duplicateName = "";
+      addStep = 1;
+    }
+    render();
+  };
+
   // Add · step 1 → run the real 'codex login' (browser or device-code), then
   // advance to the in-frame name prompt.
   const runLogin = async () => {
@@ -709,6 +888,7 @@ export async function selectAccountInteractive() {
     }
     addHasAuthenticated = true;
     full = load();
+    updateDetectedLogin();
     suggested = suggestAccountName() || "default";
     input = suggested === "default" ? "" : suggested;
     addStep = 2;
@@ -717,6 +897,11 @@ export async function selectAccountInteractive() {
 
   const saveNewAccount = () => {
     const name = (input.trim() || suggested || "default").trim();
+    if (duplicateName) {
+      hint = `This login is already saved as '${duplicateName}'.`;
+      render();
+      return;
+    }
     try {
       saveAccount(name);
       full = load();
@@ -724,6 +909,7 @@ export async function selectAccountInteractive() {
       const ws = sharedWorkspaceOf(name);
       addHasAuthenticated = false;
       addPriorAuth = null;
+      duplicateName = "";
       mode = "nav";
       refreshList();
       backToPicker(
@@ -761,7 +947,8 @@ export async function selectAccountInteractive() {
     try {
       removeAccount(confirmName);
       full = load();
-      mode = "nav";
+      emptyLoggedIn = isLoggedIn();
+      mode = full.length ? "nav" : "empty";
       refreshList();
       backToPicker(`${T.ok}${G.check}${RESET} Deleted '${confirmName}'.`);
     } catch (error) {
@@ -803,7 +990,15 @@ export async function selectAccountInteractive() {
 
     const doSwitch = (name) => {
       try {
-        switchAccount(name);
+        const selected = full.find((account) => account.name === name);
+        if (selected?.status === "current") {
+          hint = `'${name}' is already current.`;
+          render();
+          return;
+        }
+        usageAbort.abort();
+        usageLoadingName = null;
+        const result = switchAccount(name);
         // Stay in the picker so the user can switch again in the same session.
         // Reload the list to repaint the new active account. Usage remains an
         // explicit `u` action and is never fetched merely because of a switch.
@@ -813,7 +1008,11 @@ export async function selectAccountInteractive() {
           if (newActive >= 0) index = newActive;
         }
         refreshList();
-        backToPicker(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
+        backToPicker(
+          result.unchanged
+            ? `'${name}' is already current.`
+            : `${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`
+        );
       } catch (error) {
         hint = error.message;
         render();
@@ -825,6 +1024,45 @@ export async function selectAccountInteractive() {
       if (key.ctrl && key.name === "c") {
         finish(null);
         process.exitCode = 130;
+        return;
+      }
+
+      if ((mode === "nav" || mode === "search") && key.shift && key.name === "u") {
+        toggleDailyRefresh();
+        return;
+      }
+
+      if (mode === "nav" && str === "?") {
+        mode = "help";
+        hint = "";
+        render();
+        return;
+      }
+
+      if (mode === "empty") {
+        if (key.name === "return" || key.name === "enter") {
+          emptyLoggedIn = isLoggedIn();
+          beginAdd({ saveCurrent: emptyLoggedIn });
+        } else if (key.name === "q" || key.name === "escape") {
+          finish(null);
+        }
+        return;
+      }
+
+      if (mode === "help") {
+        if (key.name === "escape" || key.name === "q" || key.name === "?" || str === "?") {
+          mode = "nav";
+          render();
+        }
+        return;
+      }
+
+      if (mode === "usage-consent") {
+        if (key.name === "y") {
+          setDailyRefresh(true);
+        } else if (key.name === "n" || key.name === "escape") {
+          setDailyRefresh(false);
+        }
         return;
       }
 
@@ -840,7 +1078,7 @@ export async function selectAccountInteractive() {
             if (addHasAuthenticated) writeAuth(addPriorAuth);
             addHasAuthenticated = false;
             addPriorAuth = null;
-            mode = "nav";
+            mode = full.length ? "nav" : "empty";
             render();
           }
         } else {
@@ -937,13 +1175,8 @@ export async function selectAccountInteractive() {
           break;
         case "a":
           if (full.length) {
-            addPriorAuth = readAuth();
-            addHasAuthenticated = false;
-            mode = "add";
-            addStep = 1;
-            addMethod = "browser";
-            hint = "";
-            render();
+            const current = list[index];
+            beginAdd({ saveCurrent: current?.active && current.status === "unsaved-login" });
           }
           break;
         case "r": {
@@ -969,6 +1202,11 @@ export async function selectAccountInteractive() {
         case "u":
           refreshUsage();
           break;
+        case "?":
+          mode = "help";
+          hint = "";
+          render();
+          break;
         case "q":
         case "escape":
           finish(null);
@@ -983,5 +1221,9 @@ export async function selectAccountInteractive() {
     process.stdin.on("keypress", onKeypress);
     process.stdin.on("end", onEnd);
     renderClean();
+    const current = full.find((account) => account.active && account.status === "current");
+    if (current && shouldAutoRefresh(usageCache, current._auth.profileKey)) {
+      refreshUsage({ target: current, automatic: true });
+    }
   });
 }
