@@ -8,24 +8,26 @@ import {
   saveAccount,
   switchAccount,
 } from "../src/core.js";
+import { selectAccountInteractive } from "../src/tui.js";
 
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 function printUsage() {
-  console.log(`codex-acc - switch saved Codex CLI accounts
+  console.log(`codexsw - switch saved Codex CLI accounts
 
 Usage:
-  codex-acc save <name>       Save the current auth.json as a named account
-  codex-acc switch <name>     Switch to a saved account (auto-backs up current)
-  codex-acc list              List saved accounts
-  codex-acc current           Show the active account
-  codex-acc remove <name>     Delete a saved account
-  codex-acc help              Show this help
+  codexsw tui               Interactive account picker
+  codexsw save <name>       Save the current auth.json as a named account
+  codexsw switch <name>     Switch to a saved account (auto-backs up current)
+  codexsw list              List saved accounts
+  codexsw current           Show the active account
+  codexsw remove <name>     Delete a saved account
+  codexsw help              Show this help
 
 Notes:
-  - To add a new account, run 'codex login', then 'codex-acc save <name>'.
+  - To add a new account, run 'codex login', then 'codexsw save <name>'.
   - Restart Codex after switching if it is already running.
   - Storage: ${authFile()}`);
 }
@@ -33,7 +35,7 @@ Notes:
 function renderList() {
   const { accounts, active } = listAccounts();
   if (accounts.length === 0) {
-    console.log("No saved accounts. Run 'codex login', then 'codex-acc save <name>'.");
+    console.log("No saved accounts. Run 'codex login', then 'codexsw save <name>'.");
     return;
   }
   for (const account of accounts) {
@@ -63,16 +65,20 @@ const [, , command, ...args] = process.argv;
 
 try {
   switch (command) {
+    case "tui": {
+      await selectAccountInteractive();
+      break;
+    }
     case "save": {
       const name = args[0];
-      if (!name) die("Usage: codex-acc save <name>");
+      if (!name) die("Usage: codexsw save <name>");
       const { overwritten } = saveAccount(name);
       console.log(`Saved current auth as '${name}'.${overwritten ? " (overwritten)" : ""}`);
       break;
     }
     case "switch": {
       const name = args[0];
-      if (!name) die("Usage: codex-acc switch <name>");
+      if (!name) die("Usage: codexsw switch <name>");
       const { backedUp } = switchAccount(name);
       console.log(
         `Switched to '${name}'.${backedUp ? " (current auth backed up)" : ""}`
@@ -96,7 +102,7 @@ try {
     }
     case "remove": {
       const name = args[0];
-      if (!name) die("Usage: codex-acc remove <name>");
+      if (!name) die("Usage: codexsw remove <name>");
       removeAccount(name);
       console.log(`Removed '${name}'.`);
       break;
@@ -108,7 +114,7 @@ try {
       printUsage();
       break;
     default:
-      die(`Unknown command '${command}'. See 'codex-acc help'.`);
+      die(`Unknown command '${command}'. See 'codexsw help'.`);
   }
 } catch (error) {
   die(error.message);

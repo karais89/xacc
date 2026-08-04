@@ -1,10 +1,10 @@
 {
-  "name": "codex-acc",
+  "name": "codexsw",
   "version": "0.1.0",
   "description": "Minimal Codex CLI account switcher. Saves and swaps auth.json snapshots without using OpenAI backend APIs.",
   "type": "module",
   "bin": {
-    "codex-acc": "bin/codex-acc.js"
+    "codexsw": "bin/codexsw.js"
   },
   "files": [
     "bin",
