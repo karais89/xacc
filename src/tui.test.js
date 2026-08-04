@@ -54,11 +54,13 @@ test("scroll keeps the selected account visible when index is past the page", ()
   assert.ok(join(block).includes("account-45"), "selected account must be visible");
 });
 
-test("email renders inline at 76+ cols, on a second line at 48-75, and is hidden below 48", () => {
+test("email renders on a quiet second line at 48+ cols and moves to detail below 48", () => {
   const accounts = [acc("personal", { email: "me@example.com" })];
   const wide = text(buildTemplate(accounts, 0, { columns: 90, rows: 24 }));
-  const wideLine = wide.find((l) => l.includes("personal"));
-  assert.ok(wideLine.includes("me@example.com"), "inline email at wide widths");
+  const wideNameLine = wide.find((l) => l.includes("personal"));
+  const wideEmailLine = wide.find((l) => l.includes("me@example.com"));
+  assert.ok(wideEmailLine && !wideEmailLine.includes("personal"), "email gets its own line at wide widths");
+  assert.equal(wideEmailLine.indexOf("me@example.com"), wideNameLine.indexOf("personal"));
 
   const mid = text(buildTemplate(accounts, 0, { columns: 60, rows: 24 }));
   const midNameLine = mid.find((l) => l.includes("personal"));
@@ -85,7 +87,7 @@ test("a long email is clipped to the frame width instead of overflowing", () => 
 });
 
 // ── Status semantics ───────────────────────────────────────────────────────
-test("status badges reflect active/matched: CURRENT, AUTH CHANGED, SAVED", () => {
+test("status badges show actionable CURRENT and AUTH CHANGED states only", () => {
   const accounts = [
     acc("current", { active: true, matched: true }),
     acc("changed", { active: true, matched: false }),
@@ -94,12 +96,22 @@ test("status badges reflect active/matched: CURRENT, AUTH CHANGED, SAVED", () =>
   const joinAll = join(buildTemplate(accounts, 0, { columns: 90, rows: 24 }));
   assert.match(joinAll, /CURRENT/);
   assert.match(joinAll, /AUTH CHANGED/);
-  assert.match(joinAll, /SAVED/);
+  assert.doesNotMatch(joinAll, /SAVED/);
 });
 
-test("plan label appears on the account row", () => {
+test("plan label moves from the account row into the selected detail heading", () => {
   const accounts = [acc("personal", { plan: "plus" })];
-  assert.match(join(buildTemplate(accounts, 0, { columns: 90, rows: 24 })), /PLUS/);
+  const block = buildTemplate(accounts, 0, { columns: 90, rows: 24 });
+  const lines = text(block);
+  assert.doesNotMatch(lines.find((line) => line.includes("personal")), /PLUS/);
+  assert.match(lines.find((line) => line.includes("Usage")), /Usage · personal · Plus/);
+});
+
+test("selected account has a left rail and a subtle full-row background", () => {
+  const block = buildTemplate([acc("personal"), acc("work")], 0, { columns: 60, rows: 24 });
+  const selected = block.find((line) => line.includes("personal"));
+  assert.match(strip(selected), /[▌>]/);
+  if (process.env.NO_COLOR === undefined) assert.match(selected, /\x1b\[48;5;23m/);
 });
 
 // ── Detail / usage panel ───────────────────────────────────────────────────
@@ -144,6 +156,15 @@ test("search mode shows the query and a filter status line", () => {
   assert.match(all, /navigate/);
   assert.match(all, /switch/);
   assert.doesNotMatch(all, /apply/);
+});
+
+test("navigation toast reuses the footer instead of adding an empty top row", () => {
+  const accounts = [acc("personal")];
+  const normal = buildTemplate(accounts, 0, { columns: 60, rows: 24 });
+  const toasted = buildTemplate(accounts, 0, { columns: 60, rows: 24, hint: "Switched to personal" });
+  assert.equal(toasted.length, normal.length);
+  const lines = text(toasted);
+  assert.ok(lines.findIndex((line) => line.includes("Switched to personal")) > lines.findIndex((line) => line.includes("Usage")));
 });
 
 // ── Modal modes ────────────────────────────────────────────────────────────

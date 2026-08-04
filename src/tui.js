@@ -45,6 +45,7 @@ function buildTheme() {
     ok: c("\x1b[38;5;79m"), // active status, success
     warn: c("\x1b[38;5;215m"), // stale status
     bad: c("\x1b[38;5;203m"), // near-limit usage
+    selectionBg: c("\x1b[48;5;23m"), // subtle selected-account row
   };
 }
 const T = buildTheme();
@@ -67,14 +68,14 @@ function pickGlyphs() {
   if (modern) {
     return {
       tl: "┌", tr: "┐", bl: "└", br: "┘", lt: "├", rt: "┤", h: "─", v: "│",
-      cursor: "▸", dotActive: "●", dotStale: "◐", dotIdle: "•",
+      cursor: "▸", select: "▌", dotActive: "●", dotStale: "◐", dotIdle: "•",
       up: "↑", down: "↓", enter: "↵", back: "←", sep: "·", check: "✓",
       barFull: "▓", barEmpty: "░", ellipsis: "…",
     };
   }
   return {
     tl: "+", tr: "+", bl: "+", br: "+", lt: "+", rt: "+", h: "-", v: "|",
-    cursor: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
+    cursor: ">", select: ">", dotActive: "*", dotStale: "~", dotIdle: "o",
     up: "^", down: "v", enter: "Enter", back: "Bksp", sep: "-", check: "ok",
     barFull: "#", barEmpty: ".", ellipsis: "...",
   };
@@ -83,9 +84,6 @@ function pickGlyphs() {
 const G = pickGlyphs();
 
 const cur = `${T.accent}${G.cursor}${RESET}`;
-const dotActive = `${T.ok}${G.dotActive}${RESET}`;
-const dotStale = `${T.warn}${G.dotStale}${RESET}`;
-const dotIdle = `${T.faint}${G.dotIdle}${RESET}`;
 const rail = `${T.faint}${G.v}${RESET}`;
 
 function selectedAccount(accounts, index) {
@@ -96,32 +94,26 @@ function selectedAccount(accounts, index) {
 // Geometry is passed in explicitly ({ columns, rows }) instead of reading
 // process.stdout directly, so frames can be snapshot-tested at any size.
 
-const MAX_FRAME_WIDTH = 88;
+const MAX_FRAME_WIDTH = 80;
 const MIN_FRAME_WIDTH = 24;
 const MAX_VISIBLE_ACCOUNTS = 6;
 
 function computeLayout(columns, rows) {
   const width = Math.max(MIN_FRAME_WIDTH, Math.min(columns - 2, MAX_FRAME_WIDTH));
   const inner = width - 2; // minus rail columns
-  // >=76 cols: email inline on the account row; 48-75: email on a second
-  // line; <48: email hidden from the list (shown only in the detail panel).
-  const emailInline = columns >= 76;
+  // Keep account rows visually quiet at every width: email gets a dedicated
+  // second line from 48 cols upward, and moves into the detail panel below 48.
   const showListEmail = columns >= 48;
   // Narrow layouts need one extra detail row because the selected account's
   // email moves out of the list and into the usage panel.
   const detailRows = showListEmail ? 3 : 4;
-  return { width, inner, columns, rows, emailInline, showListEmail, detailRows };
+  return { width, inner, columns, rows, showListEmail, detailRows };
 }
 
 function statusLabel(acc) {
-  if (!acc.active) return { text: "SAVED", color: T.faint };
-  if (acc.matched) return { text: "CURRENT", color: T.ok };
-  return { text: "AUTH CHANGED", color: T.warn };
-}
-
-function planText(acc) {
-  const plan = usagePlanLabel(acc);
-  return plan ? `${T.dim}${plan.toUpperCase()}${RESET}` : "";
+  if (!acc.active) return { text: "", color: "" };
+  if (acc.matched) return { text: `${G.dotActive} CURRENT`, color: T.ok };
+  return { text: `${G.dotStale} AUTH CHANGED`, color: T.warn };
 }
 
 // Returns the scroll offset that keeps `index` visible inside a `pageSize`
@@ -132,25 +124,23 @@ function scrollStart(accounts, index, pageSize) {
   return Math.max(0, Math.min(index - Math.floor((pageSize - 1) / 2), maxStart));
 }
 
-// Renders one account as 1 line (email inline or hidden) or 2 lines (email on
-// its own second line): cursor + status dot + name [+ email] [+ plan] on the
-// left, status badge right-aligned.
+// Renders one account as a quiet name/status row plus a dedicated email row
+// when space permits. Below 48 columns the email moves to the detail panel.
 function renderAccountRow(acc, isSelected, ctx) {
-  const { inner, emailInline, showListEmail } = ctx;
+  const { inner, showListEmail } = ctx;
   const avail = inner - 2;
-  const cursor = isSelected ? cur : " ";
-  const nameColor = isSelected ? T.accent : acc.active ? T.bright : DIM;
+  const cursor = isSelected ? `${T.accent}${G.select}${RESET}` : " ";
+  const nameColor = isSelected ? T.bright : acc.active ? T.bright : DIM;
   const name = `${nameColor}${acc.name}${RESET}`;
-  const emailInlineStr = emailInline && acc.email ? `${DIM}  ${acc.email}${RESET}` : "";
-  const plan = planText(acc);
   const badge = statusLabel(acc);
-  const badgeText = `${badge.color}${badge.text}${RESET}`;
-  const left = `${cursor}${dotOf(acc)} ${name}${emailInlineStr}${plan ? `${T.faint} ${G.sep} ${RESET}${plan}` : ""}`;
-  const pad = Math.max(0, avail - displayWidth(left) - (1 + displayWidth(badgeText)));
-  const line1 = `${left}${spaceN(pad)} ${badgeText}`;
-  if (!emailInline && showListEmail && acc.email) {
+  const badgeText = badge.text ? `${badge.color}${badge.text}${RESET}` : "";
+  const left = `${cursor} ${name}`;
+  const badgeGap = badgeText ? 1 + displayWidth(badgeText) : 0;
+  const pad = Math.max(0, avail - displayWidth(left) - badgeGap);
+  const line1 = `${left}${spaceN(pad)}${badgeText ? ` ${badgeText}` : ""}`;
+  if (showListEmail && acc.email) {
     // Align the email with the account name, regardless of name length.
-    const indent = 3;
+    const indent = 2;
     const line2 = `${" ".repeat(indent)}${DIM}${acc.email}${RESET}`;
     return [line1, line2];
   }
@@ -205,7 +195,8 @@ function renderDetailPanel(acc, ctx, opts) {
     }
   }
 
-  lines.push(divider(acc ? `Usage · ${acc.name}` : ""));
+  const plan = acc ? usagePlanLabel(acc) : null;
+  lines.push(divider(acc ? ["Usage", acc.name, plan].filter(Boolean).join(" · ") : ""));
   for (let i = 0; i < detailRows; i++) {
     lines.push(content[i] ? line(content[i]) : blank());
   }
@@ -214,7 +205,7 @@ function renderDetailPanel(acc, ctx, opts) {
 }
 
 // The two key-hint footer lines for list (nav / search) modes.
-function renderFooter(mode, ctx) {
+function renderFooter(mode, ctx, hint = "") {
   const { inner } = ctx;
   const line = ctx.line;
   const compact = inner < 44;
@@ -224,6 +215,12 @@ function renderFooter(mode, ctx) {
     return [
       line(`${D(G.up)}/${D(G.down)} ${compact ? "move" : "navigate"}${sep}${D(G.enter)} switch${sep}${D("Esc")} close`),
       line(`${D("type")} filter${sep}${D(G.back)} erase`),
+    ];
+  }
+  if (hint) {
+    return [
+      line(hint),
+      line(`${D("a")} add${sep}${D("r")} rename${sep}${D("d")} delete${sep}${D("q")} quit`),
     ];
   }
   return [
@@ -251,13 +248,20 @@ export function buildTemplate(accounts, index, opts = {}) {
   } = opts;
 
   const layout = computeLayout(columns, rows);
-  const { width, inner, emailInline, showListEmail, detailRows } = layout;
+  const { width, inner, showListEmail, detailRows } = layout;
   // Clips to inner-2 so the appended ellipsis still fits within the frame.
   const text = (s) => clip(s, inner - 2);
   // A fully-padded content line: rail + content + fill + rail, always `width` wide.
-  const line = (s) => {
+  const line = (s, selected = false) => {
     const t = text(s);
-    return `${rail} ${t}${spaceN(Math.max(0, inner - 1 - displayWidth(t)))}${rail}`;
+    const content = ` ${t}${spaceN(Math.max(0, inner - 1 - displayWidth(t)))}`;
+    if (selected && T.selectionBg) {
+      // Inline foreground resets would otherwise cancel the row background;
+      // reapply it after each reset until the content cell is complete.
+      const painted = content.replaceAll(RESET, `${RESET}${T.selectionBg}`);
+      return `${rail}${T.selectionBg}${painted}${RESET}${rail}`;
+    }
+    return `${rail}${content}${rail}`;
   };
   const blank = () => `${rail} ${" ".repeat(inner - 1)}${rail}`;
   const ctx = { ...layout, text, line, blank, sep: `${T.faint} ${G.sep} ${RESET}` };
@@ -277,19 +281,15 @@ export function buildTemplate(accounts, index, opts = {}) {
   if (displayWidth(titleText) > budget) titleText = clip(titleText, Math.max(0, budget - 1));
   lines.push(`${left}${titleText}${spaceN(budget - displayWidth(titleText))}${right}`);
 
-  // ── Toast / search status ────────────────────────────────────────────────
-  // Always reserve this single line so the frame height never changes when a
-  // toast or the search status appears or disappears. Search mode claims it,
-  // otherwise it shows the hint (or stays blank).
-  lines.push(
-    mode === "search"
-      ? line(`${T.accent}search${RESET}${T.faint}|${RESET} ${query}${T.faint}_${RESET}`)
-      : hint
-        ? line(`${T.accent}${hint}${RESET}`)
-        : blank()
-  );
-
   const isModal = mode === "add" || mode === "rename" || mode === "delete";
+  // Search needs a visible input row. Modal validation errors stay near their
+  // prompt; navigation toasts reuse the footer instead of reserving empty
+  // space beneath the title.
+  if (mode === "search") {
+    lines.push(line(`${T.accent}search${RESET}${T.faint}|${RESET} ${query}${T.faint}_${RESET}`));
+  } else if (isModal && hint) {
+    lines.push(line(hint));
+  }
   if (isModal) {
     renderModal(lines, ctx, { mode, input, addStep, addMethod, confirmName, suggested });
     lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
@@ -297,12 +297,12 @@ export function buildTemplate(accounts, index, opts = {}) {
   }
 
   // ── Account list (paginated to the terminal height) ──────────────────────
-  const lpa = emailInline || !showListEmail ? 1 : 2; // lines per account
+  const lpa = showListEmail ? 2 : 1; // lines per account
   // Keep the dashboard compact when only a few accounts exist, while still
   // reserving a stable number of rows during filtering. Larger collections
   // scroll inside a six-account viewport instead of stretching the frame to
   // fill the terminal.
-  const fixed = 1 + 1 + (1 + detailRows + 1) + 2 + 1;
+  const fixed = 1 + (mode === "search" ? 1 : 0) + (1 + detailRows + 1) + 2 + 1;
   const capacity = Math.max(1, Math.floor((rows - fixed) / lpa));
   const pageSize = Math.max(
     1,
@@ -315,12 +315,19 @@ export function buildTemplate(accounts, index, opts = {}) {
   } else {
     const start = scrollStart(accounts, index, pageSize);
     let rendered = 0;
-    for (let i = start; i < accounts.length && rendered < pageSize * lpa; i++) {
-      const rowLines = renderAccountRow(accounts[i], i === index, ctx);
+    let shown = 0;
+    for (let i = start; i < accounts.length && shown < pageSize; i++) {
+      const isSelected = i === index;
+      const rowLines = renderAccountRow(accounts[i], isSelected, ctx);
       for (const rl of rowLines) {
-        lines.push(line(rl));
+        lines.push(line(rl, isSelected));
         rendered++;
       }
+      while (rendered < (shown + 1) * lpa) {
+        lines.push(line("", isSelected));
+        rendered++;
+      }
+      shown++;
     }
     while (rendered < pageSize * lpa) {
       lines.push(blank());
@@ -334,7 +341,7 @@ export function buildTemplate(accounts, index, opts = {}) {
   }
 
   // ── Footer ───────────────────────────────────────────────────────────────
-  for (const f of renderFooter(mode, ctx)) {
+  for (const f of renderFooter(mode, ctx, hint)) {
     lines.push(f);
   }
   lines.push(`${T.faint}${G.bl}${G.h.repeat(inner)}${G.br}${RESET}`);
@@ -396,14 +403,10 @@ function renderModal(lines, ctx, o) {
   lines.push(line(`${T.ok}y${RESET} yes${ctx.sep}${D("n")} no${ctx.sep}${D("Esc")} cancel`));
 }
 
-function dotOf(acc) {
-  return acc.active ? (acc.matched ? dotActive : dotStale) : dotIdle;
-}
-
-// A 10-cell usage bar. The fill color follows the limit: healthy, high, then
+// A 12-cell usage bar. The fill color follows the limit: healthy, high, then
 // near-limit. `NO_COLOR` (via T) keeps the cells readable, dropping the % tint.
 function bar(percent) {
-  const cells = 10;
+  const cells = 12;
   const pct = Math.round(percent);
   const filled = Math.max(0, Math.min(cells, Math.round((percent / 100) * cells)));
   const color = pct < 50 ? T.ok : pct < 80 ? T.warn : T.bad;
