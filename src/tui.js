@@ -540,22 +540,6 @@ export async function selectAccountInteractive() {
     }
   };
 
-  const doSwitch = (name) => {
-    try {
-      switchAccount(name);
-      // Keep the frame on screen; print the confirmation below it and stop
-      // any background redraw (refreshUsage) from painting over it.
-      finished = true;
-      usageAbort.abort();
-      process.stdout.write(SHOW_CURSOR);
-      console.log(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
-      finish(name);
-    } catch (error) {
-      hint = error.message;
-      render();
-    }
-  };
-
   return new Promise((resolvePicker) => {
     let onKeypress;
     const onEnd = () => {
@@ -573,6 +557,22 @@ export async function selectAccountInteractive() {
     const finish = (name) => {
       cleanup();
       resolvePicker(name);
+    };
+
+    const doSwitch = (name) => {
+      try {
+        switchAccount(name);
+        // Keep the frame on screen; print the confirmation below it and stop
+        // any background redraw (refreshUsage) from painting over it.
+        finished = true;
+        usageAbort.abort();
+        process.stdout.write(SHOW_CURSOR);
+        console.log(`${T.ok}${G.dotActive}${RESET} Switched to '${name}' — restart Codex if it is running.`);
+        finish(name);
+      } catch (error) {
+        hint = error.message;
+        render();
+      }
     };
 
     onKeypress = (str, key) => {
