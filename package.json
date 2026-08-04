@@ -1,5 +1,5 @@
 {
-  "name": "xacc",
+  "name": "@karais89/xacc",
   "version": "0.1.0",
   "description": "Minimal Codex CLI account switcher. Saves and swaps auth.json snapshots without using OpenAI backend APIs.",
   "type": "module",
