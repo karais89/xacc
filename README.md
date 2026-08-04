@@ -78,6 +78,7 @@ current login as your first profile instead of bailing out.
 | `xacc list [--active]` | List saved accounts; `*` active, `~` recorded but live auth differs |
 | `xacc current` | Show the active account |
 | `xacc remove <name>` | Delete a saved account |
+| `xacc --version` | Show the installed version |
 | `xacc help` | Show help |
 
 ## How it works

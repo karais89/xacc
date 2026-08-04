@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
+
 import {
   authFile,
   getActiveAccount,
@@ -11,6 +13,9 @@ import {
 } from "../src/core.js";
 import { runCodexLogin } from "../src/login.js";
 import { askLine, selectAccountInteractive } from "../src/tui.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json");
 
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
@@ -26,6 +31,7 @@ Usage:
   xacc save <name>                   Save the current auth.json as a named account
   xacc remove <name>                 Delete a saved account
   xacc tui                           Interactive account manager
+  xacc --version                     Show the installed version
   xacc help                          Show this help
 
 Notes:
@@ -146,6 +152,11 @@ try {
     case "--help":
     case undefined:
       printUsage();
+      break;
+    case "version":
+    case "-v":
+    case "--version":
+      console.log(version);
       break;
     default:
       die(`Unknown command '${command}'. See 'xacc help'.`);
